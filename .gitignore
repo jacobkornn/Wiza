@@ -1,0 +1,14 @@
+# Environment variables
+.env
+
+# Archived Wiza files
+Archive/
+
+# Generated CSVs
+SentEmails.csv
+WizaCompanies.csv
+WizaLeads.csv
+
+# Python cache (optional but recommended)
+__pycache__/
+*.pyc
