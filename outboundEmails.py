@@ -196,7 +196,7 @@ def log_email(leadId, email, status, batchId, error_message=""):
 
 def get_or_create_custom_folder(outlook, folder_name):
     namespace = outlook.GetNamespace("MAPI")
-    root = namespace.Folders.Item(1)  # Root of the mailbox
+    root = namespace.Folders['jacob.korn@outlook.com']
     try:
         target_folder = root.Folders.Item(folder_name)
     except:
@@ -244,7 +244,13 @@ def main():
             if pd.notna(recipient):
                 mail = outlook.CreateItem(0)  # olMailItem
                 mail.To = recipient
-                mail.Subject = f"Inquiry - Software Development at {lead_data.get('company', '')}"
+                lead_type = lead_data.get("type", "").lower()  # e.g., "software" or "consulting"
+                if lead_type == "software":
+                    mail.Subject = f"Inquiry - Software Development at {lead_data.get('company', '')}"
+                elif lead_type == "consulting":
+                    mail.Subject = f"Inquiry - Consulting at {lead_data.get('company', '')}"
+                else:
+                    mail.Subject = f"Inquiry at {lead_data.get('company', '')}"
                 mail.HTMLBody = email_body
                 lead_type = lead_data.get("type", "software").lower()
                 if lead_type == "consulting":
