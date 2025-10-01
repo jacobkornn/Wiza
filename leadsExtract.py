@@ -38,6 +38,15 @@ def archive_file(filepath):
         counter += 1
     shutil.move(filepath, dest)
 
+def determine_type(filename):
+    """Determine lead type based on filename."""
+    lower_name = filename.lower()
+    if "consulting" in lower_name:
+        return "consulting"
+    elif "software" in lower_name:
+        return "software"
+    return "unknown"
+
 def main():
     existing_sources = load_existing_sources()
     print(f"Already imported files: {len(existing_sources)}")
@@ -52,8 +61,10 @@ def main():
         master_df = pd.read_csv(OUTPUT_FILE)
         if "id" not in master_df.columns:
             master_df.insert(0, "id", range(1, len(master_df)+1))
+        if "type" not in master_df.columns:
+            master_df.insert(1, "type", "unknown")
     else:
-        master_df = pd.DataFrame(columns=["id"])  # empty master
+        master_df = pd.DataFrame(columns=["id","type"])  # empty master
 
     existing_emails = set(master_df["email"]) if "email" in master_df.columns else set()
     next_id = master_df["id"].max() + 1 if not master_df.empty else 1
@@ -76,6 +87,12 @@ def main():
         # Add source_file column
         df["source_file"] = base
 
+        # Assign new IDs
+        df.insert(0, "id", range(next_id, next_id + len(df)))
+        # Assign type column right after id
+        df.insert(1, "type", determine_type(base))
+        next_id += len(df)
+
         # Remove duplicates against existing master emails
         if "email" in df.columns:
             before_dedup = len(df)
@@ -86,10 +103,6 @@ def main():
 
         if df.empty:
             continue
-
-        # Assign new IDs to the remaining rows
-        df.insert(0, "id", range(next_id, next_id + len(df)))
-        next_id += len(df)
 
         print(f"Adding {file} with {len(df)} rows")
         all_new_dfs.append(df)
@@ -106,9 +119,7 @@ def main():
     # Final deduplication across all rows (keep earliest ID)
     if "email" in combined.columns:
         before = len(combined)
-        # sort by id to preserve the earliest IDs
         combined.sort_values("id", inplace=True)
-        # group by email and propagate non-NaN values within each group
         combined = combined.groupby("email", as_index=False).apply(lambda g: g.ffill().bfill().iloc[0])
         combined.reset_index(drop=True, inplace=True)
         removed = before - len(combined)
@@ -118,6 +129,10 @@ def main():
     # Reassign IDs to ensure contiguous sequence
     combined = combined.reset_index(drop=True)
     combined["id"] = range(1, len(combined)+1) 
+
+    # Ensure type column exists and is filled
+    if "type" not in combined.columns:
+        combined.insert(1, "type", "unknown")
 
     # Ensure CSV cells with commas or links are quoted ---
     combined.to_csv(OUTPUT_FILE, index=False)

@@ -10,12 +10,14 @@ load_dotenv()  # load EMAILS_SECRET from .env
 CSV_FILE = "WizaLeads.csv"
 DATA_FOLDER = "Data"
 RESUME_FILE = os.path.join(DATA_FOLDER, "jacobkorn_resume.docx")
-COVERLETTER_FILE = os.path.join(DATA_FOLDER, "jacobkorn_coverletter.docx")
+SWD_COVERLETTER_FILE = os.path.join(DATA_FOLDER, "jacobkorn_coverletter.docx")
+CONSULTING_COVERLETTER_FILE = os.path.join(DATA_FOLDER, "Consulting", "jacobkorn_coverletter.docx")
 LOG_FILE = "SentEmails.csv"
 FIELDS_USED = ["first_name", "company", "title"]
 CUSTOM_FOLDER_NAME = "Wiza Emails - Outbound"
 
-EMAIL_TEMPLATE_WITHTITLE = """\
+#Software Development, job title data exists
+SWD_EMAIL_TEMPLATE_WITHTITLE = """\
 <html>
 <body>
 <p>Hello {first_name},</p>
@@ -37,8 +39,8 @@ Jacob Korn</p>
 </body>
 </html>
 """
-
-EMAIL_TEMPLATE_NO_TITLE = """\
+#Software Development, no job title data
+SWD_EMAIL_TEMPLATE_NO_TITLE = """\
 <html>
 <body>
 <p>Hello {first_name},</p>
@@ -50,6 +52,60 @@ I thought I would reach out to introduce myself and hopefully make your job a li
 (JavaScript, CSS, HTML) and back-end (C#, Python, SQL) development. I have experience in all stages of the 
 software development lifecycle and proficiency in CI/CD practices. I am passionate about delivering 
 high-quality software solutions and driven by curiosity in exploring new technologies.</p>
+
+<p>Here is my <a href="https://www.linkedin.com/in/jacob-korn-3aa792248/">LinkedIn</a>. 
+Attached are my resume and cover letter as well. Please, don't be afraid to reach out if you come across any open positions at {company} that match my qualifications. 
+I am both eager to learn more about the company and to explore new connections!</p>
+
+<p>Wishing you all the best,<br>
+Jacob Korn</p>
+</body>
+</html>
+"""
+#Consulting, job title data exists
+CONSULTING_EMAIL_TEMPLATE_WITHTITLE = """\
+<html>
+<body>
+<p>Hello {first_name},</p>
+
+<p>I hope this email finds you well! I noticed you're working with {company} as a {title}. 
+I thought I would reach out to introduce myself and hopefully make your job a little bit easier!</p>
+
+<p>My name is Jacob and I am a Software Developer. I co-founded a startup and have led R&amp;D on AI-driven data enrichment classifiers to optimize CRM targeting 
+for digital sales and marketing. My experience spans machine learning and full-stack development — 
+Python, C#, JavaScript, HTML, SQL/PostgreSQL, React, Dynamics 365, Power Platform, and Azure — with a focus 
+on delivering scalable solutions aligned with broader business goals.</p>
+
+<p>Having built systems end-to-end, I am now excited to shift into consulting: applying the same technical 
+depth and product-driven mindset to new industries, where I can translate complex challenges into strategies 
+and solutions that drive measurable results.</p>
+
+<p>Here is my <a href="https://www.linkedin.com/in/jacob-korn-3aa792248/">LinkedIn</a>. 
+Attached are my resume and cover letter as well. Please, don't be afraid to reach out if you come across any open positions at {company} that match my qualifications. 
+I am both eager to learn more about the company and to explore new connections!</p>
+
+<p>Wishing you all the best,<br>
+Jacob Korn</p>
+</body>
+</html>
+"""
+#Consulting, no job title data
+CONSULTING_EMAIL_TEMPLATE_NO_TITLE =  """\
+<html>
+<body>
+<p>Hello {first_name},</p>
+
+<p>I hope this email finds you well! I noticed you're working at {company}. 
+I thought I would reach out to introduce myself and hopefully make your job a little bit easier!</p>
+
+<p>My name is Jacob and I am a Software Developer. I co-founded a startup and have led R&amp;D on AI-driven data enrichment classifiers to optimize CRM targeting 
+for digital sales and marketing. My experience spans machine learning and full-stack development — 
+Python, C#, JavaScript, HTML, SQL/PostgreSQL, React, Dynamics 365, Power Platform, and Azure — with a focus 
+on delivering scalable solutions aligned with broader business goals.</p>
+
+<p>Having built systems end-to-end, I am now excited to shift into consulting: applying the same technical 
+depth and product-driven mindset to new industries, where I can translate complex challenges into strategies 
+and solutions that drive measurable results.</p>
 
 <p>Here is my <a href="https://www.linkedin.com/in/jacob-korn-3aa792248/">LinkedIn</a>. 
 Attached are my resume and cover letter as well. Please, don't be afraid to reach out if you come across any open positions at {company} that match my qualifications. 
@@ -72,12 +128,25 @@ def strip_html_tags(text):
 def preview_email(lead):
     lead_data = {k: lead.get(k, "") for k in FIELDS_USED}
 
-    # Use the appropriate template
+    lead_type = lead.get("type", "software").lower()
     title_val = lead_data.get("title")
-    if pd.notna(title_val) and str(title_val).strip() != "":
-        email_body = EMAIL_TEMPLATE_WITHTITLE.format(**lead_data)
+
+    # Select template based on type
+    if lead_type == "consulting":
+        if pd.notna(title_val) and str(title_val).strip() != "":
+            email_body = CONSULTING_EMAIL_TEMPLATE_WITHTITLE.format(**lead_data)
+        else:
+            email_body = CONSULTING_EMAIL_TEMPLATE_NO_TITLE.format(**lead_data)
+    elif lead_type == "software":
+        if pd.notna(title_val) and str(title_val).strip() != "":
+            email_body = SWD_EMAIL_TEMPLATE_WITHTITLE.format(**lead_data)
+        else:
+            email_body = SWD_EMAIL_TEMPLATE_NO_TITLE.format(**lead_data)
     else:
-        email_body = EMAIL_TEMPLATE_NO_TITLE.format(**lead_data)
+        if pd.notna(title_val) and str(title_val).strip() != "":
+            email_body = SWD_EMAIL_TEMPLATE_WITHTITLE.format(**lead_data)
+        else:
+            email_body = SWD_EMAIL_TEMPLATE_NO_TITLE.format(**lead_data)
 
     print("\n--- Lead Data (used in template) ---")
     for k, v in lead_data.items():
@@ -87,7 +156,15 @@ def preview_email(lead):
     print(strip_html_tags(email_body))
 
     print("\n--- Attachments ---")
-    for attachment in [RESUME_FILE, COVERLETTER_FILE]:
+    # Select cover letter based on type
+    if lead_type == "consulting":
+        cover_file = CONSULTING_COVERLETTER_FILE
+    elif lead_type == "software":
+        cover_file = SWD_COVERLETTER_FILE
+    else:
+        cover_file = SWD_COVERLETTER_FILE
+
+    for attachment in [RESUME_FILE, cover_file]:
         if os.path.exists(attachment):
             print(f"{attachment} (will be attached)")
         else:
@@ -169,7 +246,14 @@ def main():
                 mail.To = recipient
                 mail.Subject = f"Inquiry - Software Development at {lead_data.get('company', '')}"
                 mail.HTMLBody = email_body
-                for attachment in [RESUME_FILE, COVERLETTER_FILE]:
+                lead_type = lead_data.get("type", "software").lower()
+                if lead_type == "consulting":
+                    cover_file = CONSULTING_COVERLETTER_FILE
+                elif lead_type == "software":
+                    cover_file = SWD_COVERLETTER_FILE
+                else:
+                    cover_file = SWD_COVERLETTER_FILE
+                for attachment in [RESUME_FILE, cover_file]:
                     if os.path.exists(attachment):
                         mail.Attachments.Add(os.path.abspath(attachment))
                 mail.Save()  # Save to Drafts temporarily
