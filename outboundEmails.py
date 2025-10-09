@@ -119,6 +119,54 @@ Jacob Korn</p>
 
 # ----------------- Helper Functions ----------------- #
 
+def normalize_email(addr):
+    """Normalize email-like strings to compare robustly."""
+    if pd.isna(addr):
+        return ""
+    e = str(addr).strip()
+    # strip mailto: if present
+    e = re.sub(r'^mailto:', '', e, flags=re.I)
+    e = e.strip().strip('"').lower()
+    return e
+
+def load_sent_emails_set(log_file):
+    """
+    Read SentEmails.csv (if present) and return a set of normalized emails that should be considered "already contacted".
+    By default, treat any prior status other than 'FAILURE' as already-contacted (so we skip duplicates).
+    """
+    sent = set()
+    if not os.path.exists(log_file):
+        return sent
+    try:
+        log_df = pd.read_csv(log_file, dtype=str)
+        if 'email' in log_df.columns:
+            for _, row in log_df.iterrows():
+                email = normalize_email(row.get('email', ''))
+                status = str(row.get('status', '')).strip().upper()
+                if not email:
+                    continue
+                # Skip duplicates for any status except FAILURE (you may change this rule)
+                if status != 'FAILURE':
+                    sent.add(email)
+        else:
+            # Fallback: read CSV lines and attempt to extract the email column (4th column is used in your old log format)
+            with open(log_file, 'r', encoding='utf8') as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or line.lower().startswith('id,'):
+                        continue
+                    parts = [p.strip().strip('"') for p in line.split(',')]
+                    email = ""
+                    if len(parts) > 3:
+                        email = normalize_email(parts[3])
+                    elif len(parts) > 0:
+                        email = normalize_email(parts[0])
+                    if email:
+                        sent.add(email)
+    except Exception as e:
+        print(f"Warning: could not parse {log_file} for dedupe: {e}")
+    return sent
+
 def load_leads(csv_file):
     return pd.read_csv(csv_file)
 
@@ -175,7 +223,7 @@ def preview_email(lead):
 def log_email(leadId, email, status, batchId, error_message=""):
     if os.path.exists(LOG_FILE):
         log_df = pd.read_csv(LOG_FILE)
-        next_id = log_df['id'].max() + 1
+        next_id = int(log_df['id'].max()) + 1
     else:
         log_df = pd.DataFrame(columns=['id', 'batchId', 'leadId', 'email', 'status', 'error_message', 'timestamp'])
         next_id = 1
@@ -223,18 +271,33 @@ def main():
     else:
         next_batch_id = 1
 
+    # Load leads and existing sent emails (for dedupe)
     df = load_leads(CSV_FILE)
+    sent_emails = load_sent_emails_set(LOG_FILE)
     outlook = Dispatch("Outlook.Application")
     target_folder = get_or_create_custom_folder(outlook, CUSTOM_FOLDER_NAME)
 
     print(f"Loaded {len(df)} leads from {CSV_FILE}\n")
     drafts_to_create = []
 
-    # Preview and prepare emails
+    # Preview and prepare emails, skipping duplicates found in SentEmails.csv
     for idx, row in df.iterrows():
         lead_data = row.to_dict()
+        recipient = lead_data.get("email")
+        recipient_norm = normalize_email(recipient)
+
+        if recipient_norm and recipient_norm in sent_emails:
+            # record that we intentionally skipped this duplicate lead for this batch
+            print(f"Skipping {recipient} — already present in {LOG_FILE}.")
+            log_email(lead_data.get('leadId'), recipient, "SKIPPED_DUPLICATE", batchId=next_batch_id)
+            continue
+
         email_body = preview_email(lead_data)
         drafts_to_create.append((lead_data, email_body))
+
+        # mark in-memory set so duplicates within this run are not prepared twice
+        if recipient_norm:
+            sent_emails.add(recipient_norm)
 
     # Stage emails into the custom folder
     for lead_data, email_body in drafts_to_create:
@@ -270,7 +333,7 @@ def main():
         except Exception as e:
             log_email(lead_id, recipient, "FAILURE", batchId=next_batch_id, error_message=str(e))
 
-    print(f"\nAll emails staged. SentEmails.csv updated with status='DRAFT'.")
+    print(f"\nAll emails staged. SentEmails.csv updated with status='DRAFT' or 'SKIPPED_DUPLICATE' where appropriate.")
 
 if __name__ == "__main__":
     main()
