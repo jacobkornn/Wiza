@@ -1,255 +1,139 @@
-import pandas as pd
 import os
 import re
-from datetime import datetime
+import pandas as pd
+import requests
 from win32com.client import Dispatch
 from dotenv import load_dotenv
-load_dotenv()  # load EMAILS_SECRET from .env
+from msal import ConfidentialClientApplication
+
+load_dotenv()
 
 # CONFIG
-CSV_FILE = "WizaLeads.csv"
-DATA_FOLDER = "Data"
-RESUME_FILE = os.path.join(DATA_FOLDER, "jacobkorn_resume.docx")
-SWD_COVERLETTER_FILE = os.path.join(DATA_FOLDER, "jacobkorn_coverletter.docx")
-CONSULTING_COVERLETTER_FILE = os.path.join(DATA_FOLDER, "Consulting", "jacobkorn_coverletter.docx")
-LOG_FILE = "SentEmails.csv"
+SOFTWARE_FOLDER = "Data/Software"
+SALES_FOLDER = "Data/Sales"
+
+SOFTWARE_RESUME = os.path.join(SOFTWARE_FOLDER, "Jacob_Korn_Resume.pdf")
+SALES_RESUME = os.path.join(SALES_FOLDER, "Jacob_Korn_Resume.pdf")
+SOFTWARE_COVERLETTER = os.path.join(SOFTWARE_FOLDER, "Jacob_Korn_CoverLetter.pdf")
+SALES_COVERLETTER = os.path.join(SALES_FOLDER, "Jacob_Korn_CoverLetter.pdf")
+
+CUSTOM_FOLDER_NAME = "Dynamics Emails - Outbound"
+OUTLOOK_ACCOUNT = "jake.korn@theboxk.com" 
+
 FIELDS_USED = ["first_name", "company", "title"]
-CUSTOM_FOLDER_NAME = "Wiza Emails - Outbound"
 
-#Software Development, job title data exists
-SWD_EMAIL_TEMPLATE_WITHTITLE = """\
-<html>
-<body>
-<p>Hello {first_name},</p>
-
-<p>I hope this email finds you well! I noticed you're working with {company} as a {title}. 
-I thought I would reach out to introduce myself and hopefully make your job a little bit easier!</p>
-
-<p>My name is Jacob and I am a Software Developer with expertise in both front-end 
-(JavaScript, CSS, HTML) and back-end (C#, Python, SQL) development. I have experience in all stages of the 
-software development lifecycle and proficiency in CI/CD practices. I am passionate about delivering 
-high-quality software solutions and driven by curiosity in exploring new technologies.</p>
-
-<p>Here is my <a href="https://www.linkedin.com/in/jacob-korn-3aa792248/">LinkedIn</a>. 
-Attached are my resume and cover letter as well. Please, don't be afraid to reach out if you come across any open positions at {company} that match my qualifications. 
-I am both eager to learn more about the company and to explore new connections!</p>
-
-<p>Wishing you all the best,<br>
-Jacob Korn</p>
-</body>
-</html>
-"""
-#Software Development, no job title data
-SWD_EMAIL_TEMPLATE_NO_TITLE = """\
-<html>
-<body>
-<p>Hello {first_name},</p>
-
-<p>I hope this email finds you well! I noticed you're working at {company}. 
-I thought I would reach out to introduce myself and hopefully make your job a little bit easier!</p>
-
-<p>My name is Jacob and I am a Software Developer with expertise in both front-end 
-(JavaScript, CSS, HTML) and back-end (C#, Python, SQL) development. I have experience in all stages of the 
-software development lifecycle and proficiency in CI/CD practices. I am passionate about delivering 
-high-quality software solutions and driven by curiosity in exploring new technologies.</p>
-
-<p>Here is my <a href="https://www.linkedin.com/in/jacob-korn-3aa792248/">LinkedIn</a>. 
-Attached are my resume and cover letter as well. Please, don't be afraid to reach out if you come across any open positions at {company} that match my qualifications. 
-I am both eager to learn more about the company and to explore new connections!</p>
-
-<p>Wishing you all the best,<br>
-Jacob Korn</p>
-</body>
-</html>
-"""
-#Consulting, job title data exists
-CONSULTING_EMAIL_TEMPLATE_WITHTITLE = """\
-<html>
-<body>
-<p>Hello {first_name},</p>
-
-<p>I hope this email finds you well! I noticed you're working with {company} as a {title}. 
-I thought I would reach out to introduce myself and hopefully make your job a little bit easier!</p>
-
-<p>My name is Jacob and I am a Software Developer. I co-founded a startup and have led R&amp;D on AI-driven data enrichment classifiers to optimize CRM targeting 
-for digital sales and marketing. My experience spans machine learning and full-stack development — 
-Python, C#, JavaScript, HTML, SQL/PostgreSQL, React, Dynamics 365, Power Platform, and Azure — with a focus 
-on delivering scalable solutions aligned with broader business goals.</p>
-
-<p>Having built systems end-to-end, I am now excited to shift into consulting: applying the same technical 
-depth and product-driven mindset to new industries, where I can translate complex challenges into strategies 
-and solutions that drive measurable results.</p>
-
-<p>Here is my <a href="https://www.linkedin.com/in/jacob-korn-3aa792248/">LinkedIn</a>. 
-Attached are my resume and cover letter as well. Please, don't be afraid to reach out if you come across any open positions at {company} that match my qualifications. 
-I am both eager to learn more about the company and to explore new connections!</p>
-
-<p>Wishing you all the best,<br>
-Jacob Korn</p>
-</body>
-</html>
-"""
-#Consulting, no job title data
-CONSULTING_EMAIL_TEMPLATE_NO_TITLE =  """\
-<html>
-<body>
-<p>Hello {first_name},</p>
-
-<p>I hope this email finds you well! I noticed you're working at {company}. 
-I thought I would reach out to introduce myself and hopefully make your job a little bit easier!</p>
-
-<p>My name is Jacob and I am a Software Developer. I co-founded a startup and have led R&amp;D on AI-driven data enrichment classifiers to optimize CRM targeting 
-for digital sales and marketing. My experience spans machine learning and full-stack development — 
-Python, C#, JavaScript, HTML, SQL/PostgreSQL, React, Dynamics 365, Power Platform, and Azure — with a focus 
-on delivering scalable solutions aligned with broader business goals.</p>
-
-<p>Having built systems end-to-end, I am now excited to shift into consulting: applying the same technical 
-depth and product-driven mindset to new industries, where I can translate complex challenges into strategies 
-and solutions that drive measurable results.</p>
-
-<p>Here is my <a href="https://www.linkedin.com/in/jacob-korn-3aa792248/">LinkedIn</a>. 
-Attached are my resume and cover letter as well. Please, don't be afraid to reach out if you come across any open positions at {company} that match my qualifications. 
-I am both eager to learn more about the company and to explore new connections!</p>
-
-<p>Wishing you all the best,<br>
-Jacob Korn</p>
-</body>
-</html>
-"""
+# ----------------- Template Placeholders ----------------- #
+SOFTWARE_TEMPLATE = """<html><body><p>Hello {first_name},</p><p>[Software Placeholder]</p></body></html>"""
+SALES_TEMPLATE = """<html><body><p>Hello {first_name},</p><p>[Sales Placeholder]</p></body></html>"""
+GENERIC_TEMPLATE = """<html><body><p>Hello {first_name},</p><p>[Generic Placeholder]</p></body></html>"""
 
 # ----------------- Helper Functions ----------------- #
 
 def normalize_email(addr):
-    """Normalize email-like strings to compare robustly."""
     if pd.isna(addr):
         return ""
     e = str(addr).strip()
-    # strip mailto: if present
     e = re.sub(r'^mailto:', '', e, flags=re.I)
-    e = e.strip().strip('"').lower()
-    return e
-
-def load_sent_emails_set(log_file):
-    """
-    Read SentEmails.csv (if present) and return a set of normalized emails that should be considered "already contacted".
-    By default, treat any prior status other than 'FAILURE' as already-contacted (so we skip duplicates).
-    """
-    sent = set()
-    if not os.path.exists(log_file):
-        return sent
-    try:
-        log_df = pd.read_csv(log_file, dtype=str)
-        if 'email' in log_df.columns:
-            for _, row in log_df.iterrows():
-                email = normalize_email(row.get('email', ''))
-                status = str(row.get('status', '')).strip().upper()
-                if not email:
-                    continue
-                # Skip duplicates for any status except FAILURE (you may change this rule)
-                if status != 'FAILURE':
-                    sent.add(email)
-        else:
-            # Fallback: read CSV lines and attempt to extract the email column (4th column is used in your old log format)
-            with open(log_file, 'r', encoding='utf8') as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line or line.lower().startswith('id,'):
-                        continue
-                    parts = [p.strip().strip('"') for p in line.split(',')]
-                    email = ""
-                    if len(parts) > 3:
-                        email = normalize_email(parts[3])
-                    elif len(parts) > 0:
-                        email = normalize_email(parts[0])
-                    if email:
-                        sent.add(email)
-    except Exception as e:
-        print(f"Warning: could not parse {log_file} for dedupe: {e}")
-    return sent
-
-def load_leads(csv_file):
-    return pd.read_csv(csv_file)
+    return e.strip().strip('"').lower()
 
 def strip_html_tags(text):
     return re.sub(r'<[^>]+>', '', text)
 
-def preview_email(lead):
-    lead_data = {k: lead.get(k, "") for k in FIELDS_USED}
+# ----------------- Dynamics Integration ----------------- #
 
-    lead_type = lead.get("type", "software").lower()
-    title_val = lead_data.get("title")
+def get_dynamics_token():
+    app = ConfidentialClientApplication(
+        client_id=os.getenv("DYNAMICS_CLIENT_ID"),
+        client_credential=os.getenv("DYNAMICS_CLIENT_SECRET"),
+        authority=f"https://login.microsoftonline.com/{os.getenv('TENANT_ID')}"
+    )
+    token = app.acquire_token_for_client(scopes=[f"{os.getenv('DYNAMICS_ORG_URL')}/.default"])
+    return token["access_token"]
 
-    # Select template based on type
-    if lead_type == "consulting":
-        if pd.notna(title_val) and str(title_val).strip() != "":
-            email_body = CONSULTING_EMAIL_TEMPLATE_WITHTITLE.format(**lead_data)
-        else:
-            email_body = CONSULTING_EMAIL_TEMPLATE_NO_TITLE.format(**lead_data)
-    elif lead_type == "software":
-        if pd.notna(title_val) and str(title_val).strip() != "":
-            email_body = SWD_EMAIL_TEMPLATE_WITHTITLE.format(**lead_data)
-        else:
-            email_body = SWD_EMAIL_TEMPLATE_NO_TITLE.format(**lead_data)
-    else:
-        if pd.notna(title_val) and str(title_val).strip() != "":
-            email_body = SWD_EMAIL_TEMPLATE_WITHTITLE.format(**lead_data)
-        else:
-            email_body = SWD_EMAIL_TEMPLATE_NO_TITLE.format(**lead_data)
+def load_leads_from_dynamics():
+    token = get_dynamics_token()
+    headers = {"Authorization": f"Bearer {token}"}
+    url = f"{os.getenv('DYNAMICS_ORG_URL')}/api/data/v9.2/contacts?$select=contactid,firstname,lastname,emailaddress1,jobtitle,company,cr21a_leadtype"
+    resp = requests.get(url, headers=headers)
+    resp.raise_for_status()
+    contacts = resp.json()["value"]
 
-    print("\n--- Lead Data (used in template) ---")
-    for k, v in lead_data.items():
-        print(f"{k}: {v}")
+    leads = []
+    for c in contacts:
+        leads.append({
+            "leadId": c.get("contactid"),
+            "first_name": c.get("firstname", ""),
+            "company": c.get("company", ""),
+            "title": c.get("jobtitle", ""),
+            "email": c.get("emailaddress1", ""),
+            "cr21a-leadtype": c.get("cr21a_leadtype", "")
+        })
+    return pd.DataFrame(leads)
 
-    print("\n--- Email Preview (console) ---")
-    print(strip_html_tags(email_body))
-
-    print("\n--- Attachments ---")
-    # Select cover letter based on type
-    if lead_type == "consulting":
-        cover_file = CONSULTING_COVERLETTER_FILE
-    elif lead_type == "software":
-        cover_file = SWD_COVERLETTER_FILE
-    else:
-        cover_file = SWD_COVERLETTER_FILE
-
-    for attachment in [RESUME_FILE, cover_file]:
-        if os.path.exists(attachment):
-            print(f"{attachment} (will be attached)")
-        else:
-            print(f"{attachment} (MISSING)")
-    print("-" * 40)
-    return email_body
-
-def log_email(leadId, email, status, batchId, error_message=""):
-    if os.path.exists(LOG_FILE):
-        log_df = pd.read_csv(LOG_FILE)
-        next_id = int(log_df['id'].max()) + 1
-    else:
-        log_df = pd.DataFrame(columns=['id', 'batchId', 'leadId', 'email', 'status', 'error_message', 'timestamp'])
-        next_id = 1
-
-    new_row = {
-        'id': next_id,
-        'batchId': batchId,
-        'leadId': leadId,
-        'email': email,
-        'status': status,
-        'error_message': error_message,
-        'timestamp': datetime.now().isoformat()
+def log_email_to_dynamics(contact_id, subject, body):
+    token = get_dynamics_token()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json;odata.metadata=minimal"
     }
+    payload = {
+        "subject": subject,
+        "description": body,
+        "regardingobjectid_contact@odata.bind": f"/contacts({contact_id})",
+        "statuscode": 2  # Always mark as Sent
+    }
+    url = f"{os.getenv('DYNAMICS_ORG_URL')}/api/data/v9.2/emails"
+    resp = requests.post(url, headers=headers, json=payload)
+    if not resp.ok:
+        print(f"Error logging email to Dynamics: {resp.text}")
 
-    log_df = pd.concat([log_df, pd.DataFrame([new_row])], ignore_index=True)
-    log_df = log_df.sort_values('leadId', ascending=True)
-    log_df.to_csv(LOG_FILE, index=False)
+# ----------------- Outlook Integration ----------------- #
 
 def get_or_create_custom_folder(outlook, folder_name):
     namespace = outlook.GetNamespace("MAPI")
-    root = namespace.Folders['jacob.korn@outlook.com']
+    root = namespace.Folders[OUTLOOK_ACCOUNT]   # <-- updated to your account
     try:
         target_folder = root.Folders.Item(folder_name)
     except:
         target_folder = root.Folders.Add(folder_name)
     return target_folder
+
+def preview_email(lead):
+    lead_data = {k: lead.get(k, "") for k in FIELDS_USED}
+
+    # Normalize cr21a-leadtype (case-insensitive)
+    lead_type = str(lead.get("cr21a-leadtype", "")).strip().lower()
+
+    # Select template + attachments based on cr21a-leadtype
+    if lead_type == "software":
+        email_body = SOFTWARE_TEMPLATE.format(**lead_data)
+        resume_file = SOFTWARE_RESUME
+        cover_file = SOFTWARE_COVERLETTER
+    elif lead_type == "sales":
+        email_body = SALES_TEMPLATE.format(**lead_data)
+        resume_file = SALES_RESUME
+        cover_file = SALES_COVERLETTER
+    else:
+        email_body = GENERIC_TEMPLATE.format(**lead_data)
+        resume_file = SOFTWARE_RESUME  # default fallback
+        cover_file = SOFTWARE_COVERLETTER
+
+    print("\n--- Lead Data ---")
+    for k, v in lead_data.items():
+        print(f"{k}: {v}")
+
+    print("\n--- Email Preview ---")
+    print(strip_html_tags(email_body))
+
+    print("\n--- Attachments ---")
+    for attachment in [resume_file, cover_file]:
+        if os.path.exists(attachment):
+            print(f"{attachment} (will be attached)")
+        else:
+            print(f"{attachment} (MISSING)")
+    print("-" * 40)
+
+    return email_body, [resume_file, cover_file]
 
 # ----------------- Main Workflow ----------------- #
 
@@ -261,79 +145,40 @@ def main():
 
     user_input = input("Enter secret to confirm staging emails: ")
     if user_input != secret:
-        print("Secret incorrect. Exiting without creating drafts.")
+        print("Secret incorrect. Exiting.")
         return
 
-    # Determine next batchId
-    if os.path.exists(LOG_FILE):
-        existing_log = pd.read_csv(LOG_FILE)
-        next_batch_id = int(existing_log['batchId'].max()) + 1 if not existing_log.empty else 1
-    else:
-        next_batch_id = 1
-
-    # Load leads and existing sent emails (for dedupe)
-    df = load_leads(CSV_FILE)
-    sent_emails = load_sent_emails_set(LOG_FILE)
+    df = load_leads_from_dynamics()
     outlook = Dispatch("Outlook.Application")
     target_folder = get_or_create_custom_folder(outlook, CUSTOM_FOLDER_NAME)
 
-    print(f"Loaded {len(df)} leads from {CSV_FILE}\n")
-    drafts_to_create = []
+    print(f"Loaded {len(df)} leads from Dynamics\n")
 
-    # Preview and prepare emails, skipping duplicates found in SentEmails.csv
-    for idx, row in df.iterrows():
+    for _, row in df.iterrows():
         lead_data = row.to_dict()
         recipient = lead_data.get("email")
-        recipient_norm = normalize_email(recipient)
-
-        if recipient_norm and recipient_norm in sent_emails:
-            # record that we intentionally skipped this duplicate lead for this batch
-            print(f"Skipping {recipient} — already present in {LOG_FILE}.")
-            log_email(lead_data.get('leadId'), recipient, "SKIPPED_DUPLICATE", batchId=next_batch_id)
+        if not recipient:
             continue
 
-        email_body = preview_email(lead_data)
-        drafts_to_create.append((lead_data, email_body))
+        email_body, attachments = preview_email(lead_data)
 
-        # mark in-memory set so duplicates within this run are not prepared twice
-        if recipient_norm:
-            sent_emails.add(recipient_norm)
-
-    # Stage emails into the custom folder
-    for lead_data, email_body in drafts_to_create:
-        recipient = lead_data.get("email")
-        lead_id = lead_data.get("leadId")
         try:
-            if pd.notna(recipient):
-                mail = outlook.CreateItem(0)  # olMailItem
-                mail.To = recipient
-                lead_type = lead_data.get("type", "").lower()  # e.g., "software" or "consulting"
-                if lead_type == "software":
-                    mail.Subject = f"Inquiry - Software Development at {lead_data.get('company', '')}"
-                elif lead_type == "consulting":
-                    mail.Subject = f"Inquiry - Consulting at {lead_data.get('company', '')}"
-                else:
-                    mail.Subject = f"Inquiry at {lead_data.get('company', '')}"
-                mail.HTMLBody = email_body
-                lead_type = lead_data.get("type", "software").lower()
-                if lead_type == "consulting":
-                    cover_file = CONSULTING_COVERLETTER_FILE
-                elif lead_type == "software":
-                    cover_file = SWD_COVERLETTER_FILE
-                else:
-                    cover_file = SWD_COVERLETTER_FILE
-                for attachment in [RESUME_FILE, cover_file]:
-                    if os.path.exists(attachment):
-                        mail.Attachments.Add(os.path.abspath(attachment))
-                mail.Save()  # Save to Drafts temporarily
-                mail.Move(target_folder)  # Move to custom folder
-                log_email(lead_id, recipient, "DRAFT", batchId=next_batch_id)
-            else:
-                log_email(lead_id, recipient, "FAILURE", batchId=next_batch_id, error_message="Missing recipient email")
-        except Exception as e:
-            log_email(lead_id, recipient, "FAILURE", batchId=next_batch_id, error_message=str(e))
+            mail = outlook.CreateItem(0)
+            mail.To = recipient
+            mail.Subject = f"Inquiry - {lead_data.get('company', '')}"
+            mail.HTMLBody = email_body
+            for attachment in attachments:
+                if os.path.exists(attachment):
+                    mail.Attachments.Add(os.path.abspath(attachment))
+            mail.Save()
+            mail.Move(target_folder)
 
-    print(f"\nAll emails staged. SentEmails.csv updated with status='DRAFT' or 'SKIPPED_DUPLICATE' where appropriate.")
+            # Always log as Sent
+            log_email_to_dynamics(lead_data["leadId"], mail.Subject, email_body)
+        except Exception as e:
+            print(f"Error staging email: {e}")
+
+    print("\nAll emails staged and logged to Dynamics as Sent.")
 
 if __name__ == "__main__":
     main()
