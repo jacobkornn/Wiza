@@ -3,11 +3,15 @@ import shutil
 import time
 import requests
 import math
+import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
 from msal import ConfidentialClientApplication
 from dotenv import load_dotenv
 import urllib.parse
+
+# --- Import account export helpers ---
+from accountExport import log_account_for_export, export_accounts
 
 # --- Load environment variables ---
 load_dotenv()
@@ -50,7 +54,6 @@ def excel_serial_to_iso(value):
             except Exception:
                 return None
         val = float(value)
-        # 🔑 New guard: block NaN and Infinity before using the float
         if math.isnan(val) or math.isinf(val):
             return None
         base_date = datetime(1899, 12, 30)
@@ -73,7 +76,7 @@ def upsert_account(company_name, location):
     res = requests.get(url, headers=AUTH_HEADER)
     if res.ok and res.json().get("value"):
         account_id = res.json()["value"][0]["accountid"]
-        print(f"✅ Found existing Account: {company_name} (ID={account_id})")
+        log_account_for_export(company_name, account_id, location)
         return account_id
 
     print(f"➕ Creating new Account: {company_name}")
@@ -88,12 +91,12 @@ def upsert_account(company_name, location):
     entity_id = create_res.headers.get("OData-EntityId")
     account_id = entity_id.split("(")[1].split(")")[0]
     print(f"✅ Created Account: {company_name} (ID={account_id})")
+    log_account_for_export(company_name, account_id, location)
     return account_id
 
 # --- Contact Upsert ---
 def upsert_contact(contact_name, account_id):
     if not contact_name or str(contact_name).strip() == "":
-        print("ℹ️ No Contact provided, skipping...")
         return None
 
     print(f"🔍 Looking up Contact: {contact_name}")
@@ -125,11 +128,41 @@ def upsert_contact(contact_name, account_id):
     print(f"✅ Created Contact: {contact_name} (ID={contact_id})")
     return contact_id
 
-# --- Job Create ---
-def create_job(row, account_id, contact_id=None):
-    print(f"➕ Creating Job: {row.get('Job Title')} at {row.get('Company Name')}")
+# --- Preload existing job links ---
+def preload_existing_joblinks():
+    #print("📥 Preloading existing job links from Dynamics...")
+    existing_links = set()
+    url = f"{DYNAMICS_BASE_URL}/cr21a_jobpostings?$select=cr21a_joblink"
 
-    # Map normal fields
+    while url:
+        res = requests.get(url, headers=AUTH_HEADER)
+        if not res.ok:
+            raise RuntimeError(f"Failed to fetch job links: {res.status_code} {res.text}")
+
+        for job in res.json().get("value", []):
+            link = job.get("cr21a_joblink")
+            if link:
+                existing_links.add(link.strip())
+
+        url = res.json().get("@odata.nextLink")
+
+    print(f"✅ Loaded {len(existing_links)} job links")
+    return existing_links
+
+# --- Job Create ---
+def create_job(row, account_id, contact_id=None, existing_links=None):
+    job_title = row.get("Job Title")
+    company_name = row.get("Company Name")
+    job_link_raw = row.get("Job Link", "")
+    job_link = str(job_link_raw).strip() if job_link_raw is not None else ""
+
+    # --- Uniqueness check by job link (ignore empty or "nan") ---
+    if job_link and job_link.lower() != "nan" and existing_links is not None:
+        if job_link in existing_links:
+            print(f"Skipped duplicate job: {job_title} at {company_name}")
+            return
+        existing_links.add(job_link)
+
     field_map = {
         "cr21a_jobtitle": "Job Title",
         "cr21a_companyname": "Company Name",
@@ -139,13 +172,9 @@ def create_job(row, account_id, contact_id=None):
         "cr21a_source": "Source",
         "cr21a_tags": "Tags",
     }
+    job = {dynamics_field: sanitize(row.get(csv_column))
+           for dynamics_field, csv_column in field_map.items()}
 
-    job = {
-        dynamics_field: sanitize(row.get(csv_column))
-        for dynamics_field, csv_column in field_map.items()
-    }
-
-    # Map date fields
     date_fields = {
         "cr21a_dateadded": "Date Added (UTC)",
         "cr21a_dateapplied": "Date Applied (UTC)",
@@ -153,13 +182,29 @@ def create_job(row, account_id, contact_id=None):
         "cr21a_dateoffered": "Date Offered (UTC)",
         "cr21a_daterejected": "Date Rejected (UTC)",
     }
-
     for dynamics_field, csv_column in date_fields.items():
         job[dynamics_field] = excel_serial_to_iso(row.get(csv_column))
 
-    # Required account binding
-    job["cr21a_jobposting@odata.bind"] = f"/accounts({account_id})"
+    # --- Normalize payload: replace NaN/Inf and "nan" strings with None ---
+    for k, v in list(job.items()):
+        if v is None:
+            continue
+        # Pandas/NumPy NA (covers NaN, NaT)
+        if pd.isna(v):
+            job[k] = None
+            continue
+        # NumPy/Python float non-finite
+        if isinstance(v, (float, np.floating)):
+            if not math.isfinite(float(v)):
+                job[k] = None
+                continue
+        # Literal "nan" strings
+        if isinstance(v, str) and v.strip().lower() == "nan":
+            job[k] = None
+            continue
 
+    # Required bindings
+    job["cr21a_jobposting@odata.bind"] = f"/accounts({account_id})"
     if contact_id:
         job["cr21a_jobposting_Contact@odata.bind"] = f"/contacts({contact_id})"
 
@@ -167,11 +212,10 @@ def create_job(row, account_id, contact_id=None):
     if not res.ok:
         raise RuntimeError(f"Job creation failed: {res.status_code} {res.text}")
 
-    print(f"✅ Created Job: {row.get('Job Title')} at {row.get('Company Name')}")
-
-    # --- Ingest a file (CSV or Excel) ---
-def ingest_file(file_path):
-    print(f"📂 Reading file: {file_path}")
+    print(f"✅ Created Job: {job_title} at {company_name}")
+    
+# --- Ingest a file ---
+def ingest_file(file_path, existing_links):
     ext = os.path.splitext(file_path)[1].lower()
 
     if ext == ".csv":
@@ -182,37 +226,46 @@ def ingest_file(file_path):
         print(f"⚠️ Unsupported file type: {ext}")
         return False
 
-    success_count, fail_count = 0, 0
+    # --- Normalize DataFrame to avoid NaN/NaT leaking into JSON ---
+    # Convert all columns to object dtype and replace pandas nulls with None
+    df = df.astype(object).where(pd.notnull(df), None)
+
+    success_count, fail_count, skipped_count = 0, 0, 0
     for _, row in df.iterrows():
         try:
             account_id = upsert_account(row["Company Name"], row.get("Location"))
             contact_id = upsert_contact(row.get("Contact Name"), account_id)
-            create_job(row, account_id, contact_id)
-            success_count += 1
+
+            # create_job checks uniqueness by job link
+            before_count = len(existing_links)
+            create_job(row, account_id, contact_id, existing_links)
+            after_count = len(existing_links)
+
+            if after_count == before_count:
+                skipped_count += 1
+            else:
+                success_count += 1
+
         except Exception as e:
             fail_count += 1
             print(f"❌ Error processing {row.get('Job Title')} at {row.get('Company Name')}: {e}")
 
-    print(f"📊 File summary: {success_count} jobs created, {fail_count} failures")
+    print(f"📊 File summary: {success_count} jobs created, {skipped_count} duplicates skipped, {fail_count} failures")
     return success_count > 0
 
 # --- Robust move with retry ---
 def move_with_retry(src, dst, retries=3, delay=1.0):
-    print(f"➡️ Move attempt: {src} → {dst}")
     for attempt in range(1, retries + 1):
         try:
             shutil.move(src, dst)
-            print(f"📦 Moved successfully on attempt {attempt}: {dst}")
             return True
         except Exception as e:
             print(f"⚠️ Move failed (attempt {attempt}/{retries}): {e}")
             time.sleep(delay)
 
-    # Fallback: copy then remove
     try:
         shutil.copy2(src, dst)
         os.remove(src)
-        print(f"📦 Copied and removed source as fallback: {dst}")
         return True
     except Exception as e:
         print(f"❌ Fallback copy/remove failed: {e}")
@@ -227,36 +280,30 @@ def process_all_files():
     os.makedirs(ingest_dir, exist_ok=True)
     os.makedirs(digest_dir, exist_ok=True)
 
-    print(f"🔎 Ingest directory: {ingest_dir}")
-    print(f"🔎 Digest directory: {digest_dir}")
-
-    # Show all files present
     all_files = os.listdir(ingest_dir)
-    print(f"📂 Files currently in ingest dir: {all_files}")
-
-    # Only keep supported file types
     files = [f for f in all_files if f.lower().endswith((".csv", ".xlsx", ".xls"))]
-    print(f"📄 Found {len(files)} supported file(s): {files}")
 
     if not files:
         print("ℹ️ No CSV/XLSX files found in Ingest. Exiting.")
         return
 
+    # --- preload job links once per run ---
+    existing_links = preload_existing_joblinks()
+
     for filename in files:
         src_path = os.path.join(ingest_dir, filename)
-        print(f"🚀 Starting ingestion for {filename}")
-        processed = ingest_file(src_path)
+        processed = ingest_file(src_path, existing_links)
 
         dest_path = os.path.join(digest_dir, filename)
-        print(f"🧭 Move source: {src_path}")
-        print(f"🧭 Move destination: {dest_path}")
-
         moved = move_with_retry(src_path, dest_path)
         if moved:
             status = "processed" if processed else "processed-with-errors"
-            print(f"✅ Archived file ({status}): {dest_path}")
         else:
             print(f"❌ Failed to archive file: {filename}. Please check locks/permissions.")
+
+    # Export accounts at the end of the run
+    print("📤 Exporting Accounts touched in this run...")
+    export_accounts()
 
 # Run ingestion
 if __name__ == "__main__":
