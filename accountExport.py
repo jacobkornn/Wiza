@@ -5,12 +5,19 @@ from datetime import datetime
 
 accounts_export = []
 
-def log_account_for_export(account_name, account_id, website=None):
-    accounts_export.append({
-        "Company Name": account_name,
-        "Account Id": account_id,
-        "Website": website or ""
-    })
+def log_account_for_export(account_obj):
+    export_entry = {
+        "Company Name": account_obj.get("name", ""),
+        "Account Id": account_obj.get("Account Id", ""),
+        "Website": account_obj.get("websiteurl", ""),
+        "Country": account_obj.get("address1_country", ""),
+        "City": account_obj.get("address1_city", ""),
+        "Street": account_obj.get("address1_line1", ""),
+        "State": account_obj.get("address1_stateorprovince", ""),
+        "Zip/Postal Code": account_obj.get("address1_postalcode", ""),
+        "Industry": account_obj.get("industrycode", "")
+    }
+    accounts_export.append(export_entry)
 
 def export_accounts():
     if not accounts_export:
@@ -26,7 +33,7 @@ def export_accounts():
     os.makedirs(target_dir, exist_ok=True)
     
     # Load all previous exports
-    existing_files = glob.glob(os.path.join(target_dir, "Jake_Dynamics_Acc_Import_*.csv"))
+    existing_files = glob.glob(os.path.join(target_dir, "Jake_SalesNavigator_Acc_Import_*.csv"))
     if existing_files:
         df_existing = pd.concat([pd.read_csv(f) for f in existing_files], ignore_index=True)
         df_existing = df_existing.drop_duplicates(subset=["Account Id"])

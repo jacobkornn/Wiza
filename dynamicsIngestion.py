@@ -65,9 +65,11 @@ def excel_serial_to_iso(value):
 def sanitize(value):
     return None if pd.isna(value) else value
 
-# --- Account Upsert ---
-def upsert_account(company_name, location):
+def upsert_account(account_obj):
+    company_name = account_obj.get("name")
     print(f"🔍 Looking up Account: {company_name}")
+
+    # Lookup by Dynamics 'name' field
     company_safe = company_name.replace("'", "''")
     filter_str = f"name eq '{company_safe}'"
     query = urllib.parse.quote(filter_str, safe="= '")
@@ -76,23 +78,27 @@ def upsert_account(company_name, location):
     res = requests.get(url, headers=AUTH_HEADER)
     if res.ok and res.json().get("value"):
         account_id = res.json()["value"][0]["accountid"]
-        log_account_for_export(company_name, account_id, location)
-        return account_id
+        account_obj["Account Id"] = account_id
+        log_account_for_export(account_obj)
+        return account_obj
 
-    print(f"➕ Creating new Account: {company_name}")
-    account = {"name": company_name}
-    if location:
-        account["address1_city"] = location
+    # Create (payload is already Dynamics-friendly)
+    payload = {
+        k: v for k, v in account_obj.items()
+        if v not in (None, "") and k != "Account Id"
+    }
 
-    create_res = requests.post(f"{DYNAMICS_BASE_URL}/accounts", json=account, headers=AUTH_HEADER)
+    create_res = requests.post(f"{DYNAMICS_BASE_URL}/accounts", json=payload, headers=AUTH_HEADER)
     if not create_res.ok:
         raise RuntimeError(f"Account creation failed: {create_res.status_code} {create_res.text}")
 
     entity_id = create_res.headers.get("OData-EntityId")
     account_id = entity_id.split("(")[1].split(")")[0]
     print(f"✅ Created Account: {company_name} (ID={account_id})")
-    log_account_for_export(company_name, account_id, location)
-    return account_id
+
+    account_obj["Account Id"] = account_id
+    log_account_for_export(account_obj)
+    return account_obj
 
 # --- Contact Upsert ---
 def upsert_contact(contact_name, account_id):
@@ -227,13 +233,29 @@ def ingest_file(file_path, existing_links):
         return False
 
     # --- Normalize DataFrame to avoid NaN/NaT leaking into JSON ---
-    # Convert all columns to object dtype and replace pandas nulls with None
     df = df.astype(object).where(pd.notnull(df), None)
 
     success_count, fail_count, skipped_count = 0, 0, 0
     for _, row in df.iterrows():
         try:
-            account_id = upsert_account(row["Company Name"], row.get("Location"))
+            # Build Dynamics-friendly account object from row
+            account_obj = {
+                "name": row.get("Company Name"),
+                "websiteurl": row.get("Website URL"),
+                "address1_country": row.get("Country"),
+                "address1_city": row.get("City") or row.get("Location"),
+                "address1_line1": row.get("Street"),
+                "address1_stateorprovince": row.get("State"),
+                "address1_postalcode": row.get("Zip/Postal Code"),
+                "industrycode": row.get("Industry"),
+                "tickersymbol": row.get("Stock Symbol"),
+            }
+
+            # Upsert account (injects Account Id into account_obj and logs it)
+            account_obj = upsert_account(account_obj)
+
+            # Use enriched account_obj downstream
+            account_id = account_obj["Account Id"]
             contact_id = upsert_contact(row.get("Contact Name"), account_id)
 
             # create_job checks uniqueness by job link
