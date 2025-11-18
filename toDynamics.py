@@ -2,6 +2,7 @@ import os
 import shutil
 import time
 import requests
+import math
 import pandas as pd
 from datetime import datetime, timedelta
 from msal import ConfidentialClientApplication
@@ -37,14 +38,29 @@ AUTH_HEADER = {
 }
 
 # --- Utility: Convert Excel serial date to ISO string ---
-def excel_serial_to_iso(serial):
+def excel_serial_to_iso(value):
     try:
-        if pd.isna(serial):
+        if pd.isna(value):
+            return None
+        if isinstance(value, (datetime, pd.Timestamp)):
+            return value.isoformat()
+        if isinstance(value, str):
+            try:
+                return pd.to_datetime(value).isoformat()
+            except Exception:
+                return None
+        val = float(value)
+        # 🔑 New guard: block NaN and Infinity before using the float
+        if math.isnan(val) or math.isinf(val):
             return None
         base_date = datetime(1899, 12, 30)
-        return (base_date + timedelta(days=float(serial))).isoformat()
+        return (base_date + timedelta(days=val)).isoformat()
     except Exception:
         return None
+
+# --- Sanitize helper ---
+def sanitize(value):
+    return None if pd.isna(value) else value
 
 # --- Account Upsert ---
 def upsert_account(company_name, location):
@@ -112,31 +128,48 @@ def upsert_contact(contact_name, account_id):
 # --- Job Create ---
 def create_job(row, account_id, contact_id=None):
     print(f"➕ Creating Job: {row.get('Job Title')} at {row.get('Company Name')}")
-    job = {
-        "cr21a_jobposting_jobtitle": row.get("Job Title"),
-        "cr21a_jobposting_status": row.get("Status"),
-        "cr21a_jobposting_salary": row.get("Salary"),
-        "cr21a_jobposting_location": row.get("Location"),
-        "cr21a_jobposting_joblink": row.get("Job Link"),
-        "cr21a_jobposting_source": row.get("Source"),
-        "cr21a_jobposting_tags": row.get("Tags"),
-        "cr21a_jobposting_dateadded": excel_serial_to_iso(row.get("Date Added (UTC)")),
-        "cr21a_jobposting_dateapplied": excel_serial_to_iso(row.get("Date Applied (UTC)")),
-        "cr21a_jobposting_dateinterviewed": excel_serial_to_iso(row.get("Date Interviewed (UTC)")),
-        "cr21a_jobposting_dateoffered": excel_serial_to_iso(row.get("Date Offered (UTC)")),
-        "cr21a_jobposting_daterejected": excel_serial_to_iso(row.get("Date Rejected (UTC)")),
-        "cr21a_jobposting_Account@odata.bind": f"/accounts({account_id})"
+
+    # Map normal fields
+    field_map = {
+        "cr21a_jobtitle": "Job Title",
+        "cr21a_companyname": "Company Name",
+        "cr21a_salary": "Salary",
+        "cr21a_location": "Location",
+        "cr21a_joblink": "Job Link",
+        "cr21a_source": "Source",
+        "cr21a_tags": "Tags",
     }
+
+    job = {
+        dynamics_field: sanitize(row.get(csv_column))
+        for dynamics_field, csv_column in field_map.items()
+    }
+
+    # Map date fields
+    date_fields = {
+        "cr21a_dateadded": "Date Added (UTC)",
+        "cr21a_dateapplied": "Date Applied (UTC)",
+        "cr21a_dateinterviewed": "Date Interviewed (UTC)",
+        "cr21a_dateoffered": "Date Offered (UTC)",
+        "cr21a_daterejected": "Date Rejected (UTC)",
+    }
+
+    for dynamics_field, csv_column in date_fields.items():
+        job[dynamics_field] = excel_serial_to_iso(row.get(csv_column))
+
+    # Required account binding
+    job["cr21a_jobposting@odata.bind"] = f"/accounts({account_id})"
+
     if contact_id:
         job["cr21a_jobposting_Contact@odata.bind"] = f"/contacts({contact_id})"
 
-    create_res = requests.post(f"{DYNAMICS_BASE_URL}/cr21a_jobpostings", json=job, headers=AUTH_HEADER)
-    if not create_res.ok:
-        raise RuntimeError(f"Job creation failed: {create_res.status_code} {create_res.text}")
+    res = requests.post(f"{DYNAMICS_BASE_URL}/cr21a_jobpostings", json=job, headers=AUTH_HEADER)
+    if not res.ok:
+        raise RuntimeError(f"Job creation failed: {res.status_code} {res.text}")
 
     print(f"✅ Created Job: {row.get('Job Title')} at {row.get('Company Name')}")
 
-# --- Ingest a file (CSV or Excel) ---
+    # --- Ingest a file (CSV or Excel) ---
 def ingest_file(file_path):
     print(f"📂 Reading file: {file_path}")
     ext = os.path.splitext(file_path)[1].lower()
@@ -185,6 +218,7 @@ def move_with_retry(src, dst, retries=3, delay=1.0):
         print(f"❌ Fallback copy/remove failed: {e}")
         return False
 
+# --- Process all files ---
 def process_all_files():
     base_dir = os.path.dirname(os.path.abspath(__file__))
     ingest_dir = os.path.join(base_dir, "Data", "Ingest")
