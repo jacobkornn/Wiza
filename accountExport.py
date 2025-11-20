@@ -10,12 +10,12 @@ def log_account_for_export(account_obj):
         "Company Name": account_obj.get("name", ""),
         "Account Id": account_obj.get("Account Id", ""),
         "Website": account_obj.get("websiteurl", ""),
-        "Country": account_obj.get("address1_country", ""),
-        "City": account_obj.get("address1_city", ""),
-        "Street": account_obj.get("address1_line1", ""),
-        "State": account_obj.get("address1_stateorprovince", ""),
-        "Zip/Postal Code": account_obj.get("address1_postalcode", ""),
-        "Industry": account_obj.get("industrycode", "")
+        #"Country": account_obj.get("address1_country", "")
+        # "City": account_obj.get("address1_city", ""),
+        # "Street": account_obj.get("address1_line1", ""),
+        # "State": account_obj.get("address1_stateorprovince", ""),
+        # "Zip/Postal Code": account_obj.get("address1_postalcode", ""),
+        # "Industry": account_obj.get("industrycode", "")
     }
     accounts_export.append(export_entry)
 
@@ -29,7 +29,7 @@ def export_accounts():
     
     # Resolve target directory relative to script
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    target_dir = os.path.join(base_dir, "Data", "Dynamics Imports")
+    target_dir = os.path.join(base_dir, "Data", "SalesNavigator Imports")
     os.makedirs(target_dir, exist_ok=True)
     
     # Load all previous exports
@@ -47,7 +47,7 @@ def export_accounts():
     
     # Build unique filename
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"Jake_Dynamics_Acc_Import_{timestamp}.csv"
+    filename = f"Jake_SalesNavigator_Acc_Import_{timestamp}.csv"
     filepath = os.path.join(target_dir, filename)
     
     # Write only new accounts
