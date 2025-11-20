@@ -176,18 +176,23 @@ def upsert_contact(contact_payload, contacts_by_email, contacts_by_fullname):
     fullname = sanitize(contact_payload.get("fullname"))
     cid = None
 
-    # Check if contact already exists
     if email:
         cid = contacts_by_email.get(email.strip().lower())
     if not cid and fullname:
         cid = contacts_by_fullname.get(fullname.strip().lower())
 
     if cid:
-        print(f"⏭️ Contact exists: {fullname or email} (ID={cid})")
+        print(f"🔄 Updating contact: {fullname or email} (ID={cid})")
+        res = requests.patch(
+            f"{DYNAMICS_API}/contacts({cid})",
+            json=contact_payload,
+            headers=AUTH_HEADER
+        )
+        if not res.ok:
+            raise RuntimeError(f"Contact update failed: {res.status_code} {res.text}")
         return cid
 
     # Create new contact
-    print(f"➡️ Creating contact {fullname or email} linked to account {contact_payload.get('parentcustomerid_account@odata.bind')}")
     res = requests.post(f"{DYNAMICS_API}/contacts", json=contact_payload, headers=AUTH_HEADER)
     if not res.ok:
         raise RuntimeError(f"Contact creation failed: {res.status_code} {res.text}")
@@ -202,7 +207,6 @@ def upsert_contact(contact_payload, contacts_by_email, contacts_by_fullname):
 
     print(f"➕ Contact created: {fullname or email} (ID={contact_id})")
     return contact_id
-
 
 # --- Account resolver ---
 def resolve_account_id(row, accounts_map, domains_map):
@@ -305,6 +309,13 @@ def ingest_wiza_file(file_path, accounts_map, domains_map, contacts_by_email, co
                 skipped_contacts += 1
                 print("⏭️ Skipped contact (no email/fullname)")
                 continue
+
+            #print("➡️ Contact payload:", contact_payload)
+            if "parentcustomerid_account@odata.bind" not in contact_payload:
+                print("⚠️ Missing account binding:", contact_payload)
+
+            res = requests.get(f"{DYNAMICS_API}/accounts({account_id})?$select=name", headers=AUTH_HEADER)
+            print(res.status_code, res.text)
 
             before_email_count = len(contacts_by_email)
             before_full_count = len(contacts_by_fullname)
