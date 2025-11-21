@@ -74,16 +74,29 @@ def normalize_headers(df):
     col_map = {}
     for c in df.columns:
         lc = c.strip().lower()
-        if lc in {"first name","firstname","first_name"}: col_map[c] = "firstname"
-        elif lc in {"last name","lastname","last_name"}: col_map[c] = "lastname"
-        elif lc in {"title","job title","job_title"}: col_map[c] = "jobtitle"
-        elif lc in {"company","company name","account","account name"}: col_map[c] = "accountname"
-        elif lc in {"email","email address","emailaddress1"}: col_map[c] = "emailaddress1"
-        elif lc in {"list_name","list name"}: col_map[c] = "list_name"
-        elif lc in {"website","website url"}: col_map[c] = "websiteurl"
-        elif lc in {"city"}: col_map[c] = "city"
-        elif lc in {"state","state/province"}: col_map[c] = "state"
-        elif lc in {"country"}: col_map[c] = "country"
+        if lc in {"first name","firstname","first_name"}:
+            col_map[c] = "firstname"
+        elif lc in {"last name","lastname","last_name"}:
+            col_map[c] = "lastname"
+        elif lc in {
+            "title","job title","job_title","jobtitle",
+            "job tittle","jobtittle","job ttile","joobtitle"
+        }:
+            col_map[c] = "jobtitle"
+        elif lc in {"company","company name","account","account name"}:
+            col_map[c] = "accountname"
+        elif lc in {"email","email address","emailaddress1"}:
+            col_map[c] = "emailaddress1"
+        elif lc in {"list_name","list name"}:
+            col_map[c] = "list_name"
+        elif lc in {"website","website url","websiteurl"}:
+            col_map[c] = "websiteurl"
+        elif lc in {"city"}:
+            col_map[c] = "city"
+        elif lc in {"state","state/province"}:
+            col_map[c] = "state"
+        elif lc in {"country"}:
+            col_map[c] = "country"
     return df.rename(columns=col_map)
 
 def _norm_name(name):
@@ -283,14 +296,14 @@ def ingest_wiza_file(file_path, accounts_map, domains_map, contacts_by_email, co
             # Skip non-English names
             if is_non_english(firstname) or is_non_english(lastname):
                 skipped_contacts += 1
-                print(f"⏭️ Skipped non-English contact: {firstname} {lastname}")
+                #print(f"⏭️ Skipped non-English contact: {firstname} {lastname}")
                 continue
 
             # Resolve or create account
             account_id = resolve_account_id(row, accounts_map, domains_map)
             if not account_id:
                 skipped_contacts += 1
-                print("⏭️ Skipped contact: no resolvable/creatable account")
+                #print("⏭️ Skipped contact: no resolvable/creatable account")
                 continue
 
             fullname = f"{firstname or ''} {lastname or ''}".strip() or None
@@ -300,26 +313,34 @@ def ingest_wiza_file(file_path, accounts_map, domains_map, contacts_by_email, co
                 "fullname": fullname,
                 "jobtitle": jobtitle,
                 "emailaddress1": email,
-                "cr21a_leadtype": leadtype,
-                "parentcustomerid_account@odata.bind": f"/accounts({account_id})"
+                "cr21a_leadtype": leadtype
+                #"parentcustomerid_account@odata.bind": f"/accounts({account_id})"
             }
             contact_payload = {k: v for k, v in contact_payload.items() if v not in (None, "")}
 
             if not contact_payload.get("emailaddress1") and not contact_payload.get("fullname"):
                 skipped_contacts += 1
-                print("⏭️ Skipped contact (no email/fullname)")
+                #print("⏭️ Skipped contact (no email/fullname)")
                 continue
 
-            #print("➡️ Contact payload:", contact_payload)
-            if "parentcustomerid_account@odata.bind" not in contact_payload:
-                print("⚠️ Missing account binding:", contact_payload)
-
             res = requests.get(f"{DYNAMICS_API}/accounts({account_id})?$select=name", headers=AUTH_HEADER)
-            print(res.status_code, res.text)
+            #print(res.status_code, res.text)
 
             before_email_count = len(contacts_by_email)
             before_full_count = len(contacts_by_fullname)
             _cid = upsert_contact(contact_payload, contacts_by_email, contacts_by_fullname)
+
+            # Explicitly set account binding via $ref
+            if _cid and account_id:
+                ref_url = f"{DYNAMICS_API}/contacts({_cid})/parentcustomerid_account/$ref"
+                ref_payload = {"@odata.id": f"{DYNAMICS_API}/accounts({account_id})"}
+                ref_res = requests.put(ref_url, json=ref_payload, headers=AUTH_HEADER)
+                if not ref_res.ok:
+                    failures += 1
+                    print(f"❌ Account link failed for contact {_cid}: {ref_res.status_code} {ref_res.text}")
+                else:
+                    print(f"✅ Linked contact {_cid} to account {account_id}")
+
             after_email_count = len(contacts_by_email)
             after_full_count = len(contacts_by_fullname)
 
