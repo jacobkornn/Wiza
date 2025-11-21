@@ -156,25 +156,67 @@ def load_all_jobs(session):
     print(f"Loaded {len(jobs)} job postings")
     return jobs
 
-def log_email_to_dynamics(session, contact_id, jobposting_id, subject, body):
+# ----------------- System user lookup ----------------- #
+def find_systemuser_id_by_internal_email(session, email):
+    """
+    Lookup systemuser by internalemailaddress. Returns systemuserid GUID string.
+    Raises Exception if not found.
+    """
+    if not email:
+        raise ValueError("Email must be provided to lookup systemuser")
+
+    org = os.getenv("DYNAMICS_ORG_URL").rstrip('/')
+    url = f"{org}/api/data/v9.2/systemusers"
+    # OData filter with single quotes around the email (escape any single quotes inside the email)
+    safe_email = email.replace("'", "''")
+    params = {
+        "$select": "systemuserid,internalemailaddress",
+        "$filter": f"internalemailaddress eq '{safe_email}'"
+    }
+    resp = session.get(url, params=params)
+    resp.raise_for_status()
+    items = resp.json().get("value", [])
+    if not items:
+        raise Exception(f"No systemuser found with internalemailaddress = {email}")
+    # return first match
+    systemuser_id = items[0]["systemuserid"]
+    print(f"Found systemuser id {systemuser_id} for email {email}")
+    return systemuser_id
+
+def log_email_to_dynamics(session, contact_id, jobposting_id, subject, body, sender_systemuser_id):
     """
     Log the email as an activity in Dynamics using the provided session.
-    Session must have the current Authorization header (token).
+    Creates required email_activity_parties so the email appears in Activities.
     """
     try:
         payload = {
             "subject": subject,
             "description": body,
             "directioncode": True,  # outgoing
+
+            # Activity parties: FROM (systemuser) and TO (contact)
+            "email_activity_parties": [
+                {
+                    "partyid_systemuser@odata.bind": f"/systemusers({sender_systemuser_id})",
+                    "participationtypemask": 1  # FROM
+                },
+                {
+                    "partyid_contact@odata.bind": f"/contacts({contact_id})",
+                    "participationtypemask": 2  # TO
+                }
+            ],
+
+            # Regarding fields
             "regardingobjectid_contact@odata.bind": f"/contacts({contact_id})",
             "regardingobjectid_cr21a_jobposting@odata.bind": f"/cr21a_jobpostings({jobposting_id})"
         }
         url = f"{os.getenv('DYNAMICS_ORG_URL')}/api/data/v9.2/emails"
+        # use session to preserve Authorization header
         resp = session.post(url, json=payload, headers={"Content-Type": "application/json;odata.metadata=minimal"})
         if not resp.ok:
             print(f"Error logging email {resp.status_code}: {resp.text}")
         else:
-            print("Logged email successfully")
+            print("Logged email successfully (Dynamics email activity created)")
     except Exception:
         print("Exception when logging email to Dynamics:")
         traceback.print_exc()
@@ -190,7 +232,6 @@ def get_or_create_custom_folder(outlook, folder_name):
     return target_folder
 
 # ----------------- Attachments / Templates / Email Builders ----------------- #
-# Precompute attachment paths per lead type so we don't compute them per contact
 _ATTACHMENT_CACHE = {}
 
 def select_documents_for_leadtype(leadtype):
@@ -252,7 +293,7 @@ def preview_email(contact, job, account, subject, body, attachments):
             print(f"{attachment} (MISSING)")
     print("-" * 40)
 
-def stage_email(outlook, contact, job, account, subject, body, attachments, target_folder, dynamics_session):
+def stage_email(outlook, contact, job, account, subject, body, attachments, target_folder, dynamics_session, sender_systemuser_id):
     try:
         print(f"Staging email to {contact.get('emailaddress1')}...")
         mail = outlook.CreateItem(0)
@@ -265,13 +306,14 @@ def stage_email(outlook, contact, job, account, subject, body, attachments, targ
         mail.Save()
         mail.Move(target_folder)
 
-        # Log to Dynamics using provided session
+        # Log to Dynamics using provided session and sender systemuser id
         log_email_to_dynamics(
             session=dynamics_session,
             contact_id=contact["contactid"],
             jobposting_id=job["cr21a_jobpostingid"],
             subject=subject,
-            body=body
+            body=body,
+            sender_systemuser_id=sender_systemuser_id
         )
         print("Staged email successfully")
     except Exception:
@@ -286,6 +328,15 @@ def main(preview=False):
     # Build single Dynamics session for all API traffic (token managed by get_dynamics_token)
     try:
         dynamics_session = build_dynamics_session()
+
+        # Lookup the systemuser id by internalemailaddress (matching OUTLOOK_ACCOUNT)
+        try:
+            sender_systemuser_id = find_systemuser_id_by_internal_email(dynamics_session, OUTLOOK_ACCOUNT)
+        except Exception as e:
+            print("Failed to find systemuser by internalemailaddress:")
+            traceback.print_exc()
+            return
+
         accounts, job_to_account = load_accounts_with_jobs(dynamics_session)
         contacts_map = load_all_contacts_by_account(dynamics_session)
         jobs = load_all_jobs(dynamics_session)
@@ -325,7 +376,18 @@ def main(preview=False):
                 continue
 
             try:
-                stage_email(outlook, contact, job, account, subject, body, attachments, target_folder, dynamics_session)
+                stage_email(
+                    outlook,
+                    contact,
+                    job,
+                    account,
+                    subject,
+                    body,
+                    attachments,
+                    target_folder,
+                    dynamics_session,
+                    sender_systemuser_id
+                )
                 staged_count += 1
             except Exception:
                 print("Failed to stage email for contact:")
