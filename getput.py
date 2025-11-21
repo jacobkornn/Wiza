@@ -29,29 +29,8 @@ AUTH_HEADER = {
     "Accept": "application/json"
 }
 
-# --- Step 1: Grab all contacts with their accounts ---
-print("\n📥 Fetching all contacts and their accounts...")
-
-contacts_url = (
-    f"{DYNAMICS_API}/contacts"
-    f"?$select=fullname"
-    f"&$expand=parentcustomerid_account($select=name,accountid)"
-)
-
-res = requests.get(contacts_url, headers=AUTH_HEADER)
-print("GET status:", res.status_code)
-
-if res.status_code != 200:
-    print("❌ Error fetching contacts:", res.text)
-else:
-    data = res.json()
-    contacts = data.get("value", [])
-    print(f"✅ Retrieved {len(contacts)} contacts\n")
-
-    # --- Step 2: Print each contact and its account ---
-    for c in contacts:
-        fullname = c.get("fullname", "(no name)")
-        account = c.get("parentcustomerid_account", {})
-        account_name = account.get("name", "(no account)")
-        account_id = account.get("accountid", "")
-        print(f"👤 {fullname} → 🏢 {account_name} ({account_id})")
+token = get_dynamics_token()
+headers = {"Authorization": f"Bearer {token}"}
+url = f"{os.getenv('DYNAMICS_ORG_URL')}/api/data/v9.2/accounts?$top=1&$expand=*"
+resp = requests.get(url, headers=headers)
+print(resp.json())
