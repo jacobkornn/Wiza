@@ -225,10 +225,15 @@ def upsert_contact(payload, email_map, fullname_map):
         cid = fullname_map.get(fullname.lower())
 
     if cid:
+        # Update existing contact (OK even if email missing now; we’re just enforcing on create)
         res = requests.patch(f"{DYNAMICS_API}/contacts({cid})", json=payload, headers=AUTH_HEADER)
         if not res.ok:
             raise RuntimeError(f"Contact update failed: {res.status_code} {res.text}")
         return cid
+
+    # ❗ Safety net: do NOT create a new contact without an email
+    if not email:
+        raise RuntimeError("Attempted to create a new contact without emailaddress1")
 
     # Create new
     res = requests.post(f"{DYNAMICS_API}/contacts", json=payload, headers=AUTH_HEADER)
@@ -315,6 +320,16 @@ def ingest_wiza_file(file_path, accounts_map, domains_map, email_map, fullname_m
             lastname = sanitize(row.get("lastname"))
             email = sanitize(row.get("emailaddress1"))
 
+            # ❗ HARD REQUIREMENT: must have an email to proceed
+            if not email:
+                skipped += 1
+                print(
+                    f"Skipping row (no email): "
+                    f"{(firstname or '')} {(lastname or '')} | "
+                    f"company={row.get('accountname')} | raw_email={row.get('emailaddress1')}"
+                )
+                continue
+
             if is_non_english(firstname) or is_non_english(lastname):
                 skipped += 1
                 continue
@@ -335,11 +350,10 @@ def ingest_wiza_file(file_path, accounts_map, domains_map, email_map, fullname_m
                 "cr21a_leadtype": classify_leadtype(sanitize(row.get("list_name"))),
             }
 
+            # Drop falsy values
             payload = {k: v for k, v in payload.items() if v}
 
-            if not payload.get("emailaddress1") and not payload.get("fullname"):
-                skipped += 1
-                continue
+            # (Old guard removed: we now strictly require email above)
 
             cid = upsert_contact(payload, email_map, fullname_map)
 

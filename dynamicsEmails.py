@@ -5,6 +5,7 @@ import argparse
 import requests
 import traceback
 import pandas as pd
+from datetime import datetime, timedelta, timezone
 from win32com.client import Dispatch
 from dotenv import load_dotenv
 from msal import ConfidentialClientApplication
@@ -14,6 +15,8 @@ load_dotenv()
 # ----------------- CONFIG ----------------- #
 OUTLOOK_ACCOUNT = os.getenv("OUTLOOK_ACCOUNT", "jake.korn@theboxk.com")
 CUSTOM_FOLDER_NAME = os.getenv("CUSTOM_FOLDER_NAME", "JakeJobs Outbound")
+# How many days to "cool down" a contact before emailing them again
+CONTACT_COOLDOWN_DAYS = int(os.getenv("CONTACT_COOLDOWN_DAYS", "7"))
 
 # ----------------- Templates ----------------- #
 SALES_TEMPLATE = """<html><body>
@@ -100,7 +103,9 @@ def build_dynamics_session():
     s = requests.Session()
     s.headers.update({
         "Authorization": f"Bearer {token}",
-        "Accept": "application/json;odata.metadata=minimal"
+        "Accept": "application/json;odata.metadata=minimal",
+        # include lookup logical name annotations
+        "Prefer": 'odata.include-annotations="*"'
     })
     return s
 
@@ -131,7 +136,7 @@ def load_all_contacts_by_account(session):
     # Select important fields only
     url = (
         f"{os.getenv('DYNAMICS_ORG_URL')}/api/data/v9.2/contacts"
-        f"?$select=contactid,firstname,lastname,emailaddress1,jobtitle,cr21a_leadtype,_parentcustomerid_value"
+        f"?$select=contactid,firstname,lastname,fullname,emailaddress1,jobtitle,cr21a_leadtype,_parentcustomerid_value"
     )
     resp = session.get(url)
     resp.raise_for_status()
@@ -155,6 +160,63 @@ def load_all_jobs(session):
     jobs = resp.json().get("value", [])
     print(f"Loaded {len(jobs)} job postings")
     return jobs
+
+# ----------------- Recent-email checker ----------------- #
+def load_recently_emailed_contact_ids(session, days=7):
+    """
+    Return a set of contact IDs that have been emailed (as To recipients)
+    within the last `days` days.
+    """
+    org = os.getenv("DYNAMICS_ORG_URL").rstrip("/")
+    emails_url = f"{org}/api/data/v9.2/emails"
+
+    # Use timezone-aware UTC datetime, formatted as 'YYYY-MM-DDTHH:MM:SSZ'
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    cutoff_iso = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    print(f"Loading emails sent since {cutoff_iso} to build recent-contact list...")
+
+    # Outgoing emails since cutoff, with expanded activity parties (To recipients)
+    params = {
+        "$select": "activityid,subject,createdon",
+        "$filter": f"createdon ge {cutoff_iso} and directioncode eq true",
+        "$expand": (
+            "email_activity_parties("
+            "$select=_partyid_value,participationtypemask;"
+            "$filter=participationtypemask eq 2)"
+        ),
+        "$top": "500"
+    }
+
+    recently_contacted = set()
+
+    while True:
+        resp = session.get(emails_url, params=params)
+        resp.raise_for_status()
+        data = resp.json()
+        emails = data.get("value", [])
+        print(f"  Retrieved {len(emails)} email(s) page")
+
+        for email in emails:
+            parties = email.get("email_activity_parties") or []
+            for p in parties:
+                # Only contact recipients
+                logical_name = p.get("_partyid_value@Microsoft.Dynamics.CRM.lookuplogicalname")
+                if logical_name == "contact":
+                    cid = p.get("_partyid_value")
+                    if cid:
+                        recently_contacted.add(cid)
+
+        next_link = data.get("@odata.nextLink")
+        if not next_link:
+            break
+
+        # nextLink already includes all query info
+        emails_url = next_link
+        params = None
+
+    print(f"Found {len(recently_contacted)} contacts emailed in the last {days} day(s).")
+    return recently_contacted
 
 # ----------------- System user lookup ----------------- #
 def find_systemuser_id_by_internal_email(session, email):
@@ -332,10 +394,16 @@ def main(preview=False):
         # Lookup the systemuser id by internalemailaddress (matching OUTLOOK_ACCOUNT)
         try:
             sender_systemuser_id = find_systemuser_id_by_internal_email(dynamics_session, OUTLOOK_ACCOUNT)
-        except Exception as e:
+        except Exception:
             print("Failed to find systemuser by internalemailaddress:")
             traceback.print_exc()
             return
+
+        # Build "cooldown" list of contacts recently emailed
+        recently_contacted_ids = load_recently_emailed_contact_ids(
+            dynamics_session,
+            days=CONTACT_COOLDOWN_DAYS
+        )
 
         accounts, job_to_account = load_accounts_with_jobs(dynamics_session)
         contacts_map = load_all_contacts_by_account(dynamics_session)
@@ -350,7 +418,11 @@ def main(preview=False):
 
     staged_count = 0
     skipped_no_email = 0
+    skipped_recent = 0
     missing_attachments = 0
+
+    # For summary printing of excluded contacts
+    excluded_recent_contacts = []
 
     # iterate jobs and use precomputed attachment paths per lead type
     for job in jobs:
@@ -362,17 +434,33 @@ def main(preview=False):
         print(f"\nProcessing job: {job.get('cr21a_jobtitle')} at {account.get('name')}")
 
         for contact in contacts:
+            contact_id = contact.get("contactid")
+            email_raw = contact.get("emailaddress1")
+            recipient = normalize_email(email_raw)
+
+            if not recipient:
+                print("Skipping contact with no email")
+                skipped_no_email += 1
+                continue
+
+            # Skip if this contact was emailed recently
+            if contact_id in recently_contacted_ids:
+                name = contact.get("fullname") or f"{contact.get('firstname','')} {contact.get('lastname','')}".strip()
+                print(
+                    f"Skipping contact (recently emailed): {name} "
+                    f"<{recipient}> - contacted within last {CONTACT_COOLDOWN_DAYS} day(s)"
+                )
+                skipped_recent += 1
+                excluded_recent_contacts.append((contact_id, name, recipient))
+                continue
+
             leadtype = contact.get("cr21a_leadtype", "")
             attachments = get_attachments_cached(leadtype)
             subject, body = build_email_body(contact, job, account, leadtype)
 
             if preview:
                 preview_email(contact, job, account, subject, body, attachments)
-
-            recipient = normalize_email(contact.get("emailaddress1"))
-            if not recipient:
-                print("Skipping contact with no email")
-                skipped_no_email += 1
+                # In preview mode, don't actually stage the message
                 continue
 
             try:
@@ -400,13 +488,20 @@ def main(preview=False):
     print("\nSummary")
     print(f"- Staged emails: {staged_count}")
     print(f"- Contacts skipped (no email): {skipped_no_email}")
+    print(f"- Contacts skipped (recently contacted ≤ {CONTACT_COOLDOWN_DAYS} days): {skipped_recent}")
     print(f"- Missing attachments: {missing_attachments}")
-    print("\nAll emails staged and logged to Dynamics as Sent.")
+
+    if excluded_recent_contacts:
+        print("\nContacts excluded due to recent email activity:")
+        for cid, name, email in excluded_recent_contacts:
+            print(f"  - {name} <{email}> ({cid})")
+
+    print("\nAll eligible emails staged and logged to Dynamics as Email activities.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Stage emails and log them to Dynamics")
-    parser.add_argument("--preview", action="store_true", help="Print email previews to stdout")
+    parser.add_argument("--preview", action="store_true", help="Print email previews to stdout (no staging)")
     args = parser.parse_args()
     # Allow environment override as well
-    preview_env = os.getenv("PREVIEW_EMAILS", "").strip() in ("1", "true", "yes")
+    preview_env = os.getenv("PREVIEW_EMAILS", "").strip().lower() in ("1", "true", "yes")
     main(preview=(args.preview or preview_env))
