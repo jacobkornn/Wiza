@@ -262,23 +262,28 @@ def resolve_account_id(row, accounts_map, domains_map):
     web_domain = _extract_domain(website)
     email_domain = _extract_domain(email)
 
-    if name_key and name_key in accounts_map:
-        return accounts_map[name_key]
-    if web_domain and web_domain in domains_map:
-        return domains_map[web_domain]
-    if email_domain and email_domain in domains_map:
-        return domains_map[email_domain]
+    # Prefer website domain; fall back to email domain
+    domain_key = web_domain or email_domain
 
-    if company:
-        extra_account = {
-            "websiteurl": website,
-            "address1_city": sanitize(row.get("city")),
-            "address1_stateorprovince": sanitize(row.get("state")),
-            "address1_country": sanitize(row.get("country")),
-        }
-        return upsert_account(company, accounts_map, domains_map, extra_account)
+    existing_by_name = accounts_map.get(name_key) if name_key else None
+    existing_by_domain = domains_map.get(domain_key) if domain_key else None
 
+    # ✅ Only link when BOTH name and domain resolve to the same account
+    if existing_by_name and existing_by_domain and existing_by_name == existing_by_domain:
+        account_id = existing_by_name
+        print(
+            f"🔗 Perfect match on name+domain -> "
+            f"company='{company}', domain='{domain_key}', account_id={account_id}"
+        )
+        return account_id
+
+    # ❌ No perfect match: do not upsert / create, just skip linking
+    print(
+        f"⏭️ No perfect name+domain match for company='{company}', "
+        f"domain='{domain_key}'. Not linking or creating."
+    )
     return None
+
 
 
 # --- File discovery ---
