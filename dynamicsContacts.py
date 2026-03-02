@@ -1,47 +1,10 @@
 import os
-import math
 import shutil
-import requests
 import pandas as pd
-import urllib.parse
-from msal import ConfidentialClientApplication
-from dotenv import load_dotenv
 
-load_dotenv()
+from dynamics_client import get_session, DYNAMICS_API, sanitize, extract_domain
 
-# --- Dynamics config ---
-DYNAMICS_ORG_URL = os.getenv("DYNAMICS_ORG_URL")
-DYNAMICS_API = f"{DYNAMICS_ORG_URL}/api/data/v9.2"
-
-def get_dynamics_token():
-    app = ConfidentialClientApplication(
-        client_id=os.getenv("DYNAMICS_CLIENT_ID"),
-        client_credential=os.getenv("DYNAMICS_CLIENT_SECRET"),
-        authority=f"https://login.microsoftonline.com/{os.getenv('TENANT_ID')}"
-    )
-    token = app.acquire_token_for_client(scopes=[f"{DYNAMICS_ORG_URL}/.default"])
-    if "access_token" not in token:
-        raise RuntimeError(f"Token request failed: {token}")
-    return token["access_token"]
-
-ACCESS_TOKEN = get_dynamics_token()
-AUTH_HEADER = {
-    "Authorization": f"Bearer {ACCESS_TOKEN}",
-    "Content-Type": "application/json",
-    "Accept": "application/json"
-}
-
-# --- Utilities ---
-def sanitize(value):
-    if value is None:
-        return None
-    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
-        return None
-    if isinstance(value, str):
-        v = value.strip()
-        return None if v.lower() == "nan" else v
-    return value
-
+# --- Wiza-specific utilities ---
 def normalize_title(title):
     if not title:
         return None
@@ -96,25 +59,6 @@ def normalize_headers(df):
 def _norm_name(name):
     return " ".join(str(name).strip().lower().split()) if name else None
 
-def _extract_domain(website_or_email):
-    if not website_or_email:
-        return None
-    s = str(website_or_email).strip().lower()
-
-    if "@" in s:
-        return s.split("@")[-1]
-
-    if not s.startswith(("http://", "https://")):
-        s = f"https://{s}"
-
-    try:
-        host = urllib.parse.urlparse(s).hostname
-        if not host:
-            return None
-        return host[4:] if host.startswith("www.") else host
-    except:
-        return None
-
 def is_non_english(text):
     if not text:
         return False
@@ -126,13 +70,13 @@ def is_non_english(text):
 
 
 # --- Preload Dynamics data ---
-def fetch_all_accounts():
+def fetch_all_accounts(session):
     print("📥 Fetching all Accounts...")
     accounts, domains = {}, {}
     url = f"{DYNAMICS_API}/accounts?$select=accountid,name,websiteurl"
 
     while url:
-        res = requests.get(url, headers=AUTH_HEADER)
+        res = session.get(url)
         if not res.ok:
             raise RuntimeError(f"Accounts fetch failed: {res.status_code} {res.text}")
         data = res.json()
@@ -145,7 +89,7 @@ def fetch_all_accounts():
             if name and accid:
                 accounts[_norm_name(name)] = accid
 
-            dom = _extract_domain(web)
+            dom = extract_domain(web)
             if dom:
                 domains[dom] = accid
 
@@ -155,14 +99,14 @@ def fetch_all_accounts():
     return accounts, domains
 
 
-def fetch_all_contacts():
+def fetch_all_contacts(session):
     print("📥 Fetching all Contacts...")
     contacts_by_email = {}
     contacts_by_fullname = {}
 
     url = f"{DYNAMICS_API}/contacts?$select=contactid,fullname,emailaddress1"
     while url:
-        res = requests.get(url, headers=AUTH_HEADER)
+        res = session.get(url)
         if not res.ok:
             raise RuntimeError(f"Contacts fetch failed: {res.status_code} {res.text}")
 
@@ -185,7 +129,7 @@ def fetch_all_contacts():
 
 
 # --- Upsert helpers ---
-def upsert_account(name, accounts_map, domains_map, extra=None):
+def upsert_account(session, name, accounts_map, domains_map, extra=None):
     key = _norm_name(name)
     if key in accounts_map:
         return accounts_map[key]
@@ -197,7 +141,7 @@ def upsert_account(name, accounts_map, domains_map, extra=None):
             if sv:
                 payload[k] = sv
 
-    res = requests.post(f"{DYNAMICS_API}/accounts", json=payload, headers=AUTH_HEADER)
+    res = session.post(f"{DYNAMICS_API}/accounts", json=payload)
     if not res.ok:
         raise RuntimeError(f"Account creation failed: {res.status_code} {res.text}")
 
@@ -206,7 +150,7 @@ def upsert_account(name, accounts_map, domains_map, extra=None):
 
     accounts_map[key] = account_id
 
-    dom = _extract_domain(extra.get("websiteurl")) if extra else None
+    dom = extract_domain(extra.get("websiteurl")) if extra else None
     if dom:
         domains_map[dom] = account_id
 
@@ -214,7 +158,7 @@ def upsert_account(name, accounts_map, domains_map, extra=None):
     return account_id
 
 
-def upsert_contact(payload, email_map, fullname_map):
+def upsert_contact(session, payload, email_map, fullname_map):
     email = sanitize(payload.get("emailaddress1"))
     fullname = sanitize(payload.get("fullname"))
 
@@ -225,8 +169,8 @@ def upsert_contact(payload, email_map, fullname_map):
         cid = fullname_map.get(fullname.lower())
 
     if cid:
-        # Update existing contact (OK even if email missing now; we’re just enforcing on create)
-        res = requests.patch(f"{DYNAMICS_API}/contacts({cid})", json=payload, headers=AUTH_HEADER)
+        # Update existing contact (OK even if email missing now; we're just enforcing on create)
+        res = session.patch(f"{DYNAMICS_API}/contacts({cid})", json=payload)
         if not res.ok:
             raise RuntimeError(f"Contact update failed: {res.status_code} {res.text}")
         return cid
@@ -236,7 +180,7 @@ def upsert_contact(payload, email_map, fullname_map):
         raise RuntimeError("Attempted to create a new contact without emailaddress1")
 
     # Create new
-    res = requests.post(f"{DYNAMICS_API}/contacts", json=payload, headers=AUTH_HEADER)
+    res = session.post(f"{DYNAMICS_API}/contacts", json=payload)
     if not res.ok:
         raise RuntimeError(f"Contact creation failed: {res.status_code} {res.text}")
 
@@ -259,8 +203,8 @@ def resolve_account_id(row, accounts_map, domains_map):
     email = sanitize(row.get("emailaddress1"))
 
     name_key = _norm_name(company)
-    web_domain = _extract_domain(website)
-    email_domain = _extract_domain(email)
+    web_domain = extract_domain(website)
+    email_domain = extract_domain(email)
 
     # Prefer website domain; fall back to email domain
     domain_key = web_domain or email_domain
@@ -309,7 +253,7 @@ def archive_original_file(src_path):
 
 
 # --- Main ingestion ---
-def ingest_wiza_file(file_path, accounts_map, domains_map, email_map, fullname_map):
+def ingest_wiza_file(session, file_path, accounts_map, domains_map, email_map, fullname_map):
     print(f"\n📄 Processing: {os.path.basename(file_path)}")
 
     df = pd.read_csv(file_path).astype(object).where(pd.notnull, None)
@@ -358,15 +302,13 @@ def ingest_wiza_file(file_path, accounts_map, domains_map, email_map, fullname_m
             # Drop falsy values
             payload = {k: v for k, v in payload.items() if v}
 
-            # (Old guard removed: we now strictly require email above)
-
-            cid = upsert_contact(payload, email_map, fullname_map)
+            cid = upsert_contact(session, payload, email_map, fullname_map)
 
             # Attach account
             ref = f"{DYNAMICS_API}/contacts({cid})/parentcustomerid_account/$ref"
             ref_payload = {"@odata.id": f"{DYNAMICS_API}/accounts({account_id})"}
 
-            ref_res = requests.put(ref, json=ref_payload, headers=AUTH_HEADER)
+            ref_res = session.put(ref, json=ref_payload)
             if not ref_res.ok:
                 failures += 1
                 print(f"❌ Link failed for contact {cid}: {ref_res.status_code} {ref_res.text}")
@@ -392,11 +334,13 @@ def main():
         print("ℹ️ No WIZA CSV files found.")
         return
 
-    accounts_map, domains_map = fetch_all_accounts()
-    email_map, fullname_map = fetch_all_contacts()
+    session = get_session()
+
+    accounts_map, domains_map = fetch_all_accounts(session)
+    email_map, fullname_map = fetch_all_contacts(session)
 
     for fp in files:
-        ingest_wiza_file(fp, accounts_map, domains_map, email_map, fullname_map)
+        ingest_wiza_file(session, fp, accounts_map, domains_map, email_map, fullname_map)
         archive_original_file(fp)
 
     print("\n✅ Wiza ingestion complete.")

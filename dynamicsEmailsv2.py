@@ -1,14 +1,13 @@
 import os
 import re
-import time
 import argparse
-import requests
 import traceback
 import pandas as pd
 from datetime import datetime, timezone
 from win32com.client import Dispatch
 from dotenv import load_dotenv
-from msal import ConfidentialClientApplication
+
+from dynamics_client import get_session, DYNAMICS_API
 
 load_dotenv()
 
@@ -56,62 +55,11 @@ def normalize_email(addr):
 def strip_html_tags(text):
     return re.sub(r'<[^>]+>', '', text)
 
-# ----------------- Dynamics Auth (cached, reusable) ----------------- #
-_msal_app = None
-_cached_token = None  # dict with access_token, expires_in, ext_expires_in...
-_token_acquired_at = 0.0
-
-def init_msal():
-    global _msal_app
-    if _msal_app is None:
-        _msal_app = ConfidentialClientApplication(
-            client_id=os.getenv("DYNAMICS_CLIENT_ID"),
-            client_credential=os.getenv("DYNAMICS_CLIENT_SECRET"),
-            authority=f"https://login.microsoftonline.com/{os.getenv('TENANT_ID')}"
-        )
-    return _msal_app
-
-def get_dynamics_token(force_refresh=False):
-    """
-    Return a valid access token. Caches token in-memory and refreshes
-    if expired (uses expires_in from MSAL response).
-    """
-    global _cached_token, _token_acquired_at
-    app = init_msal()
-
-    if not force_refresh and _cached_token and "access_token" in _cached_token:
-        expires_in = int(_cached_token.get("expires_in", 0))
-        # refresh 60 seconds before expiry to be safe
-        if time.time() < _token_acquired_at + expires_in - 60:
-            return _cached_token["access_token"]
-
-    token = app.acquire_token_for_client(scopes=[f"{os.getenv('DYNAMICS_ORG_URL')}/.default"])
-    if "access_token" not in token:
-        raise Exception(f"Failed to get token: {token}")
-    _cached_token = token
-    _token_acquired_at = time.time()
-    return token["access_token"]
-
-def build_dynamics_session():
-    """
-    Returns a requests.Session with Authorization header attached.
-    Use this session for all Dynamics API calls.
-    """
-    token = get_dynamics_token()
-    s = requests.Session()
-    s.headers.update({
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/json;odata.metadata=minimal",
-        # include lookup logical name annotations
-        "Prefer": 'odata.include-annotations="*"'
-    })
-    return s
-
 # ----------------- Dynamics data loaders (rely on session) ----------------- #
 def load_accounts_with_jobs(session):
     print("Loading accounts with expanded job postings...")
     url = (
-        f"{os.getenv('DYNAMICS_ORG_URL')}/api/data/v9.2/accounts"
+        f"{DYNAMICS_API}/accounts"
         f"?$select=accountid,name"
         f"&$expand=cr21a_Account_to_JobPosting($select=cr21a_jobpostingid,cr21a_jobtitle)"
     )
@@ -133,7 +81,7 @@ def load_all_contacts_by_account(session):
     print("Loading all contacts... (with createdon)")
     # Select important fields including createdon
     url = (
-        f"{os.getenv('DYNAMICS_ORG_URL')}/api/data/v9.2/contacts"
+        f"{DYNAMICS_API}/contacts"
         f"?$select=contactid,firstname,lastname,fullname,emailaddress1,jobtitle,"
         f"cr21a_leadtype,_parentcustomerid_value,createdon"
     )
@@ -153,7 +101,7 @@ def load_all_contacts_by_account(session):
 
 def load_all_jobs(session):
     print("Loading all job postings...")
-    url = f"{os.getenv('DYNAMICS_ORG_URL')}/api/data/v9.2/cr21a_jobpostings?$select=cr21a_jobpostingid,cr21a_jobtitle"
+    url = f"{DYNAMICS_API}/cr21a_jobpostings?$select=cr21a_jobpostingid,cr21a_jobtitle"
     resp = session.get(url)
     resp.raise_for_status()
     jobs = resp.json().get("value", [])
@@ -169,8 +117,7 @@ def find_systemuser_id_by_internal_email(session, email):
     if not email:
         raise ValueError("Email must be provided to lookup systemuser")
 
-    org = os.getenv("DYNAMICS_ORG_URL").rstrip('/')
-    url = f"{org}/api/data/v9.2/systemusers"
+    url = f"{DYNAMICS_API}/systemusers"
     # OData filter with single quotes around the email (escape any single quotes inside the email)
     safe_email = email.replace("'", "''")
     params = {
@@ -214,7 +161,7 @@ def log_email_to_dynamics(session, contact_id, jobposting_id, subject, body, sen
             "regardingobjectid_contact@odata.bind": f"/contacts({contact_id})",
             "regardingobjectid_cr21a_jobposting@odata.bind": f"/cr21a_jobpostings({jobposting_id})"
         }
-        url = f"{os.getenv('DYNAMICS_ORG_URL')}/api/data/v9.2/emails"
+        url = f"{DYNAMICS_API}/emails"
         # use session to preserve Authorization header
         resp = session.post(url, json=payload, headers={"Content-Type": "application/json;odata.metadata=minimal"})
         if not resp.ok:
@@ -332,9 +279,11 @@ def main(preview=False):
     # Compute today's date in UTC for createdon comparison
     today_utc = datetime.now(timezone.utc).date()
 
-    # Build single Dynamics session for all API traffic (token managed by get_dynamics_token)
+    # Build single Dynamics session for all API traffic (token managed by dynamics_client)
     try:
-        dynamics_session = build_dynamics_session()
+        dynamics_session = get_session()
+        dynamics_session.headers["Accept"] = "application/json;odata.metadata=minimal"
+        dynamics_session.headers["Prefer"] = 'odata.include-annotations="*"'
 
         # Lookup the systemuser id by internalemailaddress (matching OUTLOOK_ACCOUNT)
         try:
