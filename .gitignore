@@ -4,6 +4,9 @@
 # Archived Wiza files
 Archive/
 
+# Data folders
+Data/
+
 # Generated CSVs
 SentEmails.csv
 WizaCompanies.csv
