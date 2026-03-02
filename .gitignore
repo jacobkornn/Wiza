@@ -12,3 +12,6 @@ WizaLeads.csv
 # Python cache (optional but recommended)
 __pycache__/
 *.pyc
+
+# Claude Code
+.claude/
