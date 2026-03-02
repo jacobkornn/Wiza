@@ -241,21 +241,21 @@ def resolve_account_id(session, row, accounts_map, domains_map):
                 print(f"   ⚠️ Backfill failed: {patch_resp.status_code} {patch_resp.text}")
             return existing_by_name
 
-    # ⚠️ Domain matches but name doesn't — possible subsidiary or mismatch
+    # ✅ Domain matches but name doesn't — trust the domain (e.g. subsidiary names)
     if existing_by_domain and not existing_by_name:
         print(
-            f"⚠️ Domain '{domain_key}' matches account_id={existing_by_domain} but "
-            f"company name '{company}' does not match. Skipping to be safe."
+            f"🔗 Domain match -> domain='{domain_key}', "
+            f"company='{company}' (name mismatch), account_id={existing_by_domain}"
         )
-        return None
+        return existing_by_domain
 
-    # ⚠️ Name and domain both match but to DIFFERENT accounts — conflict
+    # ✅ Name and domain both match but to DIFFERENT accounts — trust domain
     if existing_by_name and existing_by_domain and existing_by_name != existing_by_domain:
         print(
             f"⚠️ Conflict: name '{company}' -> {existing_by_name}, "
-            f"domain '{domain_key}' -> {existing_by_domain}. Skipping."
+            f"domain '{domain_key}' -> {existing_by_domain}. Using domain match."
         )
-        return None
+        return existing_by_domain
 
     # ❌ No match at all
     print(
