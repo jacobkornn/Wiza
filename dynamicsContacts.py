@@ -197,7 +197,7 @@ def upsert_contact(session, payload, email_map, fullname_map):
 
 
 # --- Account resolver ---
-def resolve_account_id(row, accounts_map, domains_map):
+def resolve_account_id(session, row, accounts_map, domains_map):
     company = sanitize(row.get("accountname"))
     website = sanitize(row.get("websiteurl"))
     email = sanitize(row.get("emailaddress1"))
@@ -212,18 +212,54 @@ def resolve_account_id(row, accounts_map, domains_map):
     existing_by_name = accounts_map.get(name_key) if name_key else None
     existing_by_domain = domains_map.get(domain_key) if domain_key else None
 
-    # ✅ Only link when BOTH name and domain resolve to the same account
+    # ✅ Both name and domain resolve to the same account
     if existing_by_name and existing_by_domain and existing_by_name == existing_by_domain:
-        account_id = existing_by_name
         print(
             f"🔗 Perfect match on name+domain -> "
-            f"company='{company}', domain='{domain_key}', account_id={account_id}"
+            f"company='{company}', domain='{domain_key}', account_id={existing_by_name}"
         )
-        return account_id
+        return existing_by_name
 
-    # ❌ No perfect match: do not upsert / create, just skip linking
+    # ✅ Name matches an account that has NO domain yet — trust the name,
+    #    and backfill the website on the Dynamics record so future runs get
+    #    a perfect name+domain match.
+    if existing_by_name and not existing_by_domain and domain_key:
+        # Make sure no OTHER account already owns this domain
+        if domain_key not in domains_map:
+            print(
+                f"🔗 Name match (no domain on record) -> "
+                f"company='{company}', domain='{domain_key}', account_id={existing_by_name}. "
+                f"Backfilling websiteurl."
+            )
+            # Backfill websiteurl on Dynamics account
+            patch_url = f"{DYNAMICS_API}/accounts({existing_by_name})"
+            patch_resp = session.patch(patch_url, json={"websiteurl": website or f"https://{domain_key}"})
+            if patch_resp.ok:
+                domains_map[domain_key] = existing_by_name
+                print(f"   ✅ Backfilled websiteurl with domain '{domain_key}'")
+            else:
+                print(f"   ⚠️ Backfill failed: {patch_resp.status_code} {patch_resp.text}")
+            return existing_by_name
+
+    # ⚠️ Domain matches but name doesn't — possible subsidiary or mismatch
+    if existing_by_domain and not existing_by_name:
+        print(
+            f"⚠️ Domain '{domain_key}' matches account_id={existing_by_domain} but "
+            f"company name '{company}' does not match. Skipping to be safe."
+        )
+        return None
+
+    # ⚠️ Name and domain both match but to DIFFERENT accounts — conflict
+    if existing_by_name and existing_by_domain and existing_by_name != existing_by_domain:
+        print(
+            f"⚠️ Conflict: name '{company}' -> {existing_by_name}, "
+            f"domain '{domain_key}' -> {existing_by_domain}. Skipping."
+        )
+        return None
+
+    # ❌ No match at all
     print(
-        f"⏭️ No perfect name+domain match for company='{company}', "
+        f"⏭️ No match for company='{company}', "
         f"domain='{domain_key}'. Not linking or creating."
     )
     return None
@@ -283,7 +319,7 @@ def ingest_wiza_file(session, file_path, accounts_map, domains_map, email_map, f
                 skipped += 1
                 continue
 
-            account_id = resolve_account_id(row, accounts_map, domains_map)
+            account_id = resolve_account_id(session, row, accounts_map, domains_map)
             if not account_id:
                 skipped += 1
                 continue

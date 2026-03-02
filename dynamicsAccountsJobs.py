@@ -175,7 +175,6 @@ def create_job(session, row, account_id, contact_id=None, existing_links=None):
     field_map = {
         "cr21a_jobtitle": "Job Title",
         "cr21a_companyname": "Company Name",
-        "cr21a_salary": "Salary",
         "cr21a_location": "Location",
         "cr21a_joblink": "Job Link",
         "cr21a_source": "Source",
@@ -262,7 +261,7 @@ def ingest_file(session, file_path, existing_links, accounts_cache, date_filter=
                 "name": row.get("Company Name"),
                 "websiteurl": row.get("Website URL"),
                 "address1_country": row.get("Country"),
-                "address1_city": row.get("City") or row.get("Location"),
+                "address1_city": (str(row.get("City") or row.get("Location") or "")[:80] or None),
                 "address1_line1": row.get("Street"),
                 "address1_stateorprovince": row.get("State"),
                 "address1_postalcode": row.get("Zip/Postal Code"),
