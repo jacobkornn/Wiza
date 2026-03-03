@@ -18,10 +18,10 @@ CUSTOM_FOLDER_NAME = os.getenv("CUSTOM_FOLDER_NAME", "JakeJobs Outbound")
 # ----------------- Templates ----------------- #
 SALES_TEMPLATE = """<html><body>
 <p>Hi {firstname},</p>
-<p>I recently applied for the {cr21a_jobtitle} position at {account_name} and wanted to reach out directly.
+<p>Hope this message finds you well! I recently applied for the {cr21a_jobtitle} position at {account_name} and wanted to reach out directly.
 With a CS background and startup experience applying machine learning to sales and marketing,
 I bring technical depth plus strong communication skills.
-Given your role as {contact_jobtitle}, I’d love to connect and learn more about {account_name}’s sales approach.</p>
+Given your role as {contact_jobtitle}, I'd love to connect and learn more about navigating potential opportunities at {account_name}.</p>
 <p>Best,<br>{your_full_name}</p>
 <p><br>(425) 354-0440<br>
 <a href="https://www.linkedin.com/in/jacob-korn-3aa792248/">My LinkedIn</a></p>
@@ -29,10 +29,9 @@ Given your role as {contact_jobtitle}, I’d love to connect and learn more abou
 
 ENGINEERING_TEMPLATE = """<html><body>
 <p>Hi {firstname},</p>
-<p>I recently applied for the {cr21a_jobtitle} position at {account_name} and wanted to reach out directly.
-With my CS background and startup experience building and applying machine learning to CRM data workflows,
-I bring technical depth and complex problem-solving skills.
-Given your role as {contact_jobtitle}, I’d love to connect and learn more about {account_name}’s engineering practices.</p>
+<p>Hope this message finds you well! I recently applied for the {cr21a_jobtitle} position at {account_name} and wanted to reach out directly.
+I am a software engineer with entrepreneurial experience building and applying machine learning to CRM data workflows.
+Given your role as {contact_jobtitle}, I'd love to connect and learn more about navigating potential opportunities at {account_name}.</p>
 <p>Best,<br>{your_full_name}</p>
 <p><br>(425) 354-0440<br>
 <a href="https://www.linkedin.com/in/jacob-korn-3aa792248/">My LinkedIn</a></p>
