@@ -133,6 +133,30 @@ def find_systemuser_id_by_internal_email(session, email):
     print(f"Found systemuser id {systemuser_id} for email {email}")
     return systemuser_id
 
+def preload_contacted_contacts(session):
+    """Load all contact IDs that appear as a TO recipient on any outgoing email activity."""
+    print("📥 Preloading already-contacted contacts from Dynamics email activity parties...")
+    contacted = set()
+    # participationtypemask 2 = TO recipient; filter to contact party records only
+    url = (
+        f"{DYNAMICS_API}/activityparties"
+        f"?$select=_partyid_value,_activityid_value"
+        f"&$filter=participationtypemask eq 2"
+        f" and _partyid_value ne null"
+    )
+    while url:
+        resp = session.get(url)
+        if not resp.ok:
+            raise RuntimeError(f"Failed to fetch activity parties: {resp.status_code} {resp.text}")
+        data = resp.json()
+        for party in data.get("value", []):
+            cid = party.get("_partyid_value")
+            if cid:
+                contacted.add(cid)
+        url = data.get("@odata.nextLink")
+    print(f"✅ Found {len(contacted)} already-contacted contacts")
+    return contacted
+
 def log_email_to_dynamics(session, contact_id, jobposting_id, subject, body, sender_systemuser_id):
     """
     Log the email as an activity in Dynamics using the provided session.
@@ -221,7 +245,7 @@ def build_email_body(contact, job, account, leadtype):
         body = ENGINEERING_TEMPLATE.format(**template_data)
     else:
         body = SALES_TEMPLATE.format(**template_data)
-    subject = f"Application for {template_data['cr21a_jobtitle']} at {template_data['account_name']}"
+    subject = f"Introduction - Interested in {template_data['account_name']}"
     return subject, body
 
 def preview_email(contact, job, account, subject, body, attachments):
@@ -272,11 +296,13 @@ def stage_email(outlook, contact, job, account, subject, body, attachments, targ
         raise
 
 # ----------------- Main Workflow ----------------- #
-def main(preview=False):
+def main(preview=False, new_only=False):
     print("Starting Dynamics email staging app...")
+    if new_only:
+        print("🆕 NEW-ONLY mode: skipping contacts that already have an outgoing email activity")
 
-    # Compute today's date in UTC for createdon comparison
-    today_utc = datetime.now(timezone.utc).date()
+    # Cutoff date for createdon filter
+    cutoff_date = datetime.now(timezone.utc).date()
 
     # Build single Dynamics session for all API traffic (token managed by dynamics_client)
     try:
@@ -295,6 +321,9 @@ def main(preview=False):
         accounts, job_to_account = load_accounts_with_jobs(dynamics_session)
         contacts_map = load_all_contacts_by_account(dynamics_session)
         jobs = load_all_jobs(dynamics_session)
+
+        # Preload already-contacted contacts if new-only mode
+        contacted_contacts = preload_contacted_contacts(dynamics_session) if new_only else set()
     except Exception:
         print("Failed to load data from Dynamics:")
         traceback.print_exc()
@@ -306,6 +335,7 @@ def main(preview=False):
     staged_count = 0
     skipped_no_email = 0
     skipped_not_today = 0
+    skipped_already_contacted = 0
     missing_attachments = 0
 
     # iterate jobs and use precomputed attachment paths per lead type
@@ -327,6 +357,12 @@ def main(preview=False):
                 skipped_no_email += 1
                 continue
 
+            # --- NEW-ONLY FILTER: skip contacts already emailed ---
+            if new_only and contact_id in contacted_contacts:
+                print(f"Skipping contact {contact_id} (already contacted)")
+                skipped_already_contacted += 1
+                continue
+
             # --- NEW FILTER: only contacts created today (UTC date) ---
             createdon_str = contact.get("createdon")
             if not createdon_str:
@@ -342,10 +378,10 @@ def main(preview=False):
                 skipped_not_today += 1
                 continue
 
-            if createdon_dt.date() != today_utc:
+            if createdon_dt.date() < cutoff_date:
                 print(
-                    f"Skipping contact {contact_id} not created today "
-                    f"(createdon={createdon_dt.date()}, today_utc={today_utc})"
+                    f"Skipping contact {contact_id} created before cutoff "
+                    f"(createdon={createdon_dt.date()}, cutoff={cutoff_date})"
                 )
                 skipped_not_today += 1
                 continue
@@ -385,15 +421,19 @@ def main(preview=False):
     print("\nSummary")
     print(f"- Staged emails: {staged_count}")
     print(f"- Contacts skipped (no email): {skipped_no_email}")
-    print(f"- Contacts skipped (createdon != today UTC): {skipped_not_today}")
+    print(f"- Contacts skipped (createdon before {cutoff_date}): {skipped_not_today}")
+    if new_only:
+        print(f"- Contacts skipped (already contacted): {skipped_already_contacted}")
     print(f"- Missing attachments: {missing_attachments}")
 
-    print("\nAll eligible emails (contacts created today) staged and logged to Dynamics as Email activities.")
+    print(f"\nAll eligible emails (contacts created today, {cutoff_date}) staged and logged to Dynamics as Email activities.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Stage emails and log them to Dynamics")
     parser.add_argument("--preview", action="store_true", help="Print email previews to stdout (no staging)")
+    parser.add_argument("--new-only", action="store_true", dest="new_only",
+                        help="Only stage emails to contacts not yet contacted (no existing outgoing email activity)")
     args = parser.parse_args()
     # Allow environment override as well
     preview_env = os.getenv("PREVIEW_EMAILS", "").strip().lower() in ("1", "true", "yes")
-    main(preview=(args.preview or preview_env))
+    main(preview=(args.preview or preview_env), new_only=args.new_only)

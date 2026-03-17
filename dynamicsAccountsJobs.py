@@ -245,15 +245,15 @@ def ingest_file(session, file_path, existing_links, accounts_cache, date_filter=
     df = df.astype(object).where(pd.notnull(df), None)
 
     if date_filter:
-        print(f"📅 Date filter active: only processing rows with Date Added = {date_filter}")
+        print(f"📅 Date filter active: only processing rows with Date Added on or after {date_filter}")
 
     success_count, fail_count, skipped_count, skipped_date = 0, 0, 0, 0
     for _, row in df.iterrows():
         try:
-            # --- Date filter ---
+            # --- Date filter (accept rows on or after cutoff date) ---
             if date_filter:
                 row_date = _parse_row_date(row.get("Date Added (UTC)"))
-                if row_date != date_filter:
+                if not row_date or row_date < date_filter:
                     skipped_date += 1
                     continue
             # Build Dynamics-friendly account object from row
